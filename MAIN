@@ -1,0 +1,318 @@
+Imports Newtonsoft.Json
+Imports System.Net
+Imports System.IO
+Imports Newtonsoft.Json.Linq
+Imports System.Security.Cryptography.X509Certificates
+
+
+Module MainProcess
+    Private log As LogWriter = New LogWriter()
+
+    Public Function RENAPO_Called(ByRef CURP As String) As Boolean
+        Dim result As Boolean = False
+        log.WriteLog("Se realiza la consulta a RENAPO", LogTarget.Transaction_RENAPO)
+        Try
+            Dim _wsRenapo As WSRenapo.ConsultaPorCurpServicePortTypeClient = New WSRenapo.ConsultaPorCurpServicePortTypeClient("ConsultaPorCurpServiceHttpsSoap12Endpoint")
+            Dim _wsOptions As WSRenapo.DatosConsultaCurp = New WSRenapo.DatosConsultaCurp
+
+            With _wsOptions
+                .cveCurp = CURP
+                .tipoTransaccionSpecified = True
+                .tipoTransaccion = 1
+                .usuario = GetSetting("usuario")
+                .password = GetSetting("password")
+                .direccionIp = GetSetting("direccionIp")
+                .cveEntidadEmisora = "0"
+
+            End With
+
+            Dim response = _wsRenapo.consultarPorCurp(_wsOptions)
+            Dim doc As XDocument = XDocument.Parse(response)
+            Dim statusOper = doc.Root.Attributes("statusOper").First().Value
+            Dim message = doc.Root.Attributes("message").First().Value
+            Dim TipoError = doc.Root.Attributes("TipoError").First().Value
+            Dim codigoError = doc.Root.Attributes("CodigoError").First().Value
+
+            If statusOper <> "EXITOSO" Then 'This is the status that  RENAPO returns when a query doesn't succeed
+                result = False
+                log.WriteLog("Consulta a RENAPO NO exitosa: |Status " & statusOper & " |Message " & message & " |TipoError " & TipoError & " |CodigoError " & codigoError, LogTarget.Transaction_RENAPO)
+            Else
+                result = True
+                log.WriteLog("Consulta a RENAPO exitosa: |Status " & statusOper, LogTarget.Transaction_RENAPO)
+            End If
+        Catch ex As Exception
+            log.WriteLog("Mensaje de error: " & ex.Message, LogTarget.Transaction_RENAPO)
+        End Try
+        Return result
+    End Function
+
+
+    Public Function INE_Called(ByRef input As InputParams) As OutputParams
+        log.WriteLog("Se realiza la consulta a INE", LogTarget.Transaction_INE)
+        Dim result As OutputParams = New OutputParams()
+
+        'Main Structure
+        Dim vd As VerifyData = New VerifyData()
+        Dim dc As datosCifrados = New datosCifrados
+        Dim dataToSignCryptedData, dataToSignTimeStamp, dataToSign, dataSigned As String
+
+        Try
+            Dim Id As String = String.Empty
+            If String.IsNullOrEmpty(input.CIC) Then
+                Id = input.ClaveElector
+            Else
+                Id = input.CIC
+            End If
+
+            With result
+                .ClaveElector = Id
+                .RespuestaINE = False
+                .AsertividadID = "0%"
+                .AsertividadII = "0%"
+            End With
+
+            'dataToEncrypt Structure
+            FillData(input, dc)
+            Dim dataToEncrypt As String = JsonConvert.SerializeObject(dc, Formatting.None)
+            log.WriteLog("JSON de los datos que se van a cifrar: " & Environment.NewLine & Environment.NewLine & dataToEncrypt & Environment.NewLine, LogTarget.Transaction_INE)
+            Dim encryptedData As String = EncryptData(dataToEncrypt)
+            'Finish encryptation data
+
+            vd.data.datosCifrados = encryptedData
+            FillBody(input, vd)
+
+            'Copy structure from main data to VeriData4S
+            'Prepare data for the digital sign: node “data” and node “timeStamp”
+            Dim vd4s As VerifyData4S = New VerifyData4S
+            vd4s.data = vd.data
+            vd4s.timeStamp = vd.timeStamp
+
+            'Serialize data crypted and time stamp
+            dataToSignCryptedData = JsonConvert.SerializeObject(vd4s.data, Formatting.None)
+            dataToSignTimeStamp = JsonConvert.SerializeObject(vd4s.timeStamp, Formatting.None)
+            CleanDataToSign(dataToSignCryptedData)
+            CleanDataToSign(dataToSignTimeStamp)
+
+            dataToSign = dataToSignCryptedData & dataToSignTimeStamp
+            'log.WriteLog("JSON de los datos que se van a firmar: " & Environment.NewLine & Environment.NewLine & dataToSign & Environment.NewLine, LogTarget.Transaction_INE)
+            Dim dataToSign256 As String = SHA.SHA256HexHashString(dataToSign) 'It is converted to SHA256
+            dataSigned = SignStructure(dataToSign256)
+
+            vd.signature.signedInfo.reference.digestValue = dataToSign256
+            vd.signature.signatureValue = dataSigned
+
+            Dim json As String = JsonConvert.SerializeObject(vd, Formatting.None)
+            log.WriteLog("JSON final formado para el INE: " & Environment.NewLine & Environment.NewLine & json & Environment.NewLine, LogTarget.Transaction_INE)
+
+            Dim finalResultJSON As String = ConsultINE(json)
+            log.WriteLog("JSON regresado por el INE para la CE/CIC " & input.CIC & " " & input.ClaveElector & Environment.NewLine & finalResultJSON & Environment.NewLine, LogTarget.Transaction_INE)
+
+
+            If Not String.IsNullOrEmpty(finalResultJSON) Then
+                Dim finalResultString As JObject = JObject.Parse(finalResultJSON)
+                If finalResultString("response")("codigoRespuesta").ToString() = "0" Then
+                    If finalResultString("response")("dataResponse")("codigoRespuestaDatos").ToString = "0" Then
+                        Dim respuestaINE_S As String = finalResultString("response")("dataResponse")("respuestaSituacionRegistral")("tipoSituacionRegistral").ToString
+                        Dim respuestaINE As Boolean
+                        Dim respuestaOtro As String = String.Empty
+
+                        If respuestaINE_S = "VIGENTE" Then
+                            respuestaINE = True
+                        Else
+                            respuestaINE = False
+                            respuestaOtro = "INE Response: " + respuestaINE_S
+                        End If
+
+                        With result
+                            .ClaveElector = Id
+                            .RespuestaINE = respuestaINE
+                            .ErrorConnection = respuestaOtro
+                        End With
+
+                        If finalResultString("response")("minutiaeResponse").HasValues Then
+                            If finalResultString("response")("minutiaeResponse")("codigoRespuestaMinucia").ToString = "0" Then
+                                Dim asertividadID As String = finalResultString("response")("minutiaeResponse")("similitud2").ToString
+                                Dim asertividadII As String = finalResultString("response")("minutiaeResponse")("similitud7").ToString
+                                With result
+                                    .AsertividadID = asertividadID
+                                    .AsertividadII = asertividadII
+                                End With
+                            Else
+                                With result
+                                    .ErrorConnection = "Código error INE en las minucias: " & finalResultString("response")("minutiaeResponse")("codigoRespuestaMinucia").ToString()
+                                    log.WriteLog("Mensaje de error: " & result.ErrorConnection, LogTarget.Transaction_INE)
+                                End With
+                            End If
+                        End If
+                    Else
+                        With result
+                            .ErrorConnection = "Código error INE en la consulta de datos: " & finalResultString("response")("dataResponse")("codigoRespuestaDatos").ToString()
+                            log.WriteLog("Mensaje de error: " & result.ErrorConnection, LogTarget.Transaction_INE)
+                        End With
+                    End If
+                Else
+                    With result
+                        .ErrorConnection = "Código error INE en la consulta: " & finalResultString("response")("codigoRespuesta").ToString()
+                    End With
+                    log.WriteLog("Mensaje de error: " & result.ErrorConnection, LogTarget.Transaction_INE)
+                End If
+            End If
+
+        Catch ex As Exception
+            log.WriteLog("Mensaje de error: " & ex.Message, LogTarget.Transaction_INE)
+            With result
+                .ErrorConnection = ex.Message
+            End With
+        End Try
+        Return result
+    End Function
+
+
+    Private Sub FillData(ByRef input As InputParams, ByRef dc As datosCifrados)
+        Try
+            'Sección VerifyData -> data -> datosCifrados
+            If String.IsNullOrEmpty(input.CIC) Then
+                dc.ocr = input.OCR
+                dc.claveElector = input.ClaveElector
+                dc.numeroEmisionCredencial = input.NumEmision
+            Else
+                dc.cic = input.CIC
+            End If
+
+            If Not String.IsNullOrEmpty(input.Curp) Then
+                dc.curp = input.Curp
+            End If
+        Catch ex As Exception
+            Throw New Exception("Error al ejecutar el llenado de datos base |" & ex.Message)
+        End Try
+    End Sub
+
+    Private Sub FillBody(ByRef input As InputParams, ByRef verifyData As VerifyData)
+        Try
+            'Sección VerifyData -> data -> minucias
+            verifyData.data.minucias.tipo = GetSetting("tipoMinucia")
+            'índice derecho
+            verifyData.data.minucias.minucia2 = input.ImgWSQ2
+
+            'índice izquierdo
+            verifyData.data.minucias.minucia7 = input.ImgWSQ7
+
+            'Sección VerifyData -> data -> ubicacion -> localidad
+            verifyData.data.ubicacion.localidad.ciudad = GetSetting("ciudad")
+            verifyData.data.ubicacion.localidad.estado = Integer.Parse(GetSetting("estado"))
+            verifyData.data.ubicacion.localidad.codigoPostal = GetSetting("codigoPostal")
+
+            'Sección VerifyData -> data -> ubicacion -> posicion Satelital
+            verifyData.data.ubicacion.posicionSatelital.latitud = Single.Parse(GetSetting("latitud"))
+            verifyData.data.ubicacion.posicionSatelital.longitud = Single.Parse(GetSetting("longitud"))
+
+            'Sección VerifyData -> signature -> signedInfo 
+            verifyData.signature.signedInfo.canonicalizationMethod.algorithm = GetSetting("canonicalizationMethod")
+            verifyData.signature.signedInfo.signatureMethod.algorithm = GetSetting("signatureMethod")
+            verifyData.signature.signedInfo.reference.digestMethod.algorithm = GetSetting("digestMethod")
+            verifyData.signature.signedInfo.reference.uri = "#DATA"
+
+            'Sección VerifyData -> signature -> keyInfo
+            verifyData.signature.keyInfo.x509Data.x509SerialNumber = GetSetting("x509SerialNumber")
+
+            'Seccion VerifyDara -> timeStamp
+            verifyData.timeStamp.momento = DateTime.Now.ToString("yyyyMMddhhmmssZ")
+            verifyData.timeStamp.indice = Guid.NewGuid().ToString
+            verifyData.timeStamp.numeroSerie = String.Empty
+
+        Catch ex As Exception
+            Throw New Exception("Error al ejecutar el llenado de datos |" & ex.Message)
+        End Try
+    End Sub
+
+    Private Function EncryptData(dataToEncrypt As String) As String
+        Dim hsm As MainHSM = New MainHSM
+        Dim result As String = String.Empty
+        Try
+            Dim dataHex As String = ConvertStringToHex(dataToEncrypt) 'It is converted to HEX
+            result = hsm.EncryptINEData(dataHex) 'It is encrypted
+            result = HexString2B64(result) 'It is converted to Base 64
+            Return result
+        Catch ex As Exception
+            Throw New Exception("Error en el cifrado de los datos |" & ex.Message)
+        End Try
+    End Function
+
+    Private Function SignStructure(vd4s As String) As String
+        Dim stringRequest As String = String.Empty, result As String = String.Empty
+        Try
+            Dim hsm As MainHSM = New MainHSM
+            'Dim dataSHA As String = SHA.SHA256HexHashString(vd4s) 'It is converted to SHA256
+            result = hsm.SignINEdata(vd4s) 'It is signed
+            result = HexString2B64(result) 'It is converted to Base 64
+            Return result
+        Catch ex As Exception
+            Throw New Exception("Error al firmar los datos |" & ex.Message)
+        End Try
+    End Function
+
+    Private Sub CleanDataToSign(ByRef dataToSign As String)
+        Try
+            Dim oldvalue As String = """data"":"
+            Dim oldvalue2 As String = """timeStamp"":"
+            dataToSign = dataToSign.Replace(oldvalue, String.Empty)
+            dataToSign = dataToSign.Replace(oldvalue2, String.Empty)
+        Catch ex As Exception
+            Throw New Exception("Error en limpiado de datos |" & ex.Message)
+        End Try
+    End Sub
+
+    Private Function ConsultINE(json As String) As String
+        Dim response As String = String.Empty
+        Try
+            Dim uriINE As String = GetSetting("uriINE")
+            Dim certificateName As String = GetSetting("certificateName")
+
+            ServicePointManager.Expect100Continue = True
+            ServicePointManager.SecurityProtocol = CType(3072, SecurityProtocolType) Or SecurityProtocolType.Tls Or SecurityProtocolType.Ssl3 Or CType(3072, SecurityProtocolType)
+            ServicePointManager.ServerCertificateValidationCallback = New System.Net.Security.RemoteCertificateValidationCallback(AddressOf AcceptAllCertifications)
+
+            Dim req As HttpWebRequest = TryCast(WebRequest.Create(uriINE), HttpWebRequest)
+            req.Method = "POST"
+            req.ContentType = "application/json"
+            req.KeepAlive = False
+            req.Timeout = Convert.ToInt32(GetSetting("timeoutSerINE")) 'Minute
+            req.AllowAutoRedirect = True
+            req.Accept = "application/json"
+            req.ProtocolVersion = HttpVersion.Version10
+
+            Dim store As X509Store = New X509Store(StoreName.My, StoreLocation.LocalMachine)
+            store.Open(OpenFlags.ReadOnly)
+            Dim collection As X509Certificate2Collection = store.Certificates.Find(X509FindType.FindBySubjectName, certificateName, True)
+            req.ClientCertificates = collection
+
+            Dim JsonStringParams As String = json
+            Dim postData As Stream = req.GetRequestStream()
+            Dim byteArray As Byte() = Encoding.UTF8.GetBytes(JsonStringParams)
+            postData.Write(byteArray, 0, byteArray.Length)
+            postData.Flush()
+            postData.Close()
+
+            Dim webResponse As WebResponse = req.GetResponse()
+            Dim webStream As Stream = webResponse.GetResponseStream()
+            Dim responseReader As StreamReader = New StreamReader(webStream)
+            response = responseReader.ReadToEnd()
+            responseReader.Close()
+
+        Catch exW As WebException
+            Throw New Exception("Error en la consulta INE_W |" & exW.Message)
+        Catch ex As Exception
+            Dim msg As String = String.Empty
+            For Each kvp As KeyValuePair(Of String, String) In ex.Data
+                msg += Environment.NewLine + kvp.Key + " " + kvp.Value
+            Next kvp
+            Throw New Exception("Error en la consulta INE |" & ex.Message & " " & msg)
+        End Try
+        Return response
+    End Function
+
+    Public Function AcceptAllCertifications(ByVal sender As Object, ByVal certification As System.Security.Cryptography.X509Certificates.X509Certificate, ByVal chain As System.Security.Cryptography.X509Certificates.X509Chain, ByVal sslPolicyErrors As System.Net.Security.SslPolicyErrors) As Boolean
+        Return True
+    End Function
+
+End Module
