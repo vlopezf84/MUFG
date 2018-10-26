@@ -1,0 +1,13 @@
+Imports System.ServiceModel.Web
+Imports System.ServiceModel
+Imports System.Runtime.Serialization
+Imports System.IO
+
+<ServiceContract()> _
+Public Interface IServiceData
+
+    <OperationContract(Name:="PostValidation")>
+    <WebInvoke(Method:="POST", UriTemplate:="PostValidation/Valores", RequestFormat:=WebMessageFormat.Json, ResponseFormat:=WebMessageFormat.Json)>
+    Function PostValidation(ByVal value As InputParams) As OutputParams
+
+End Interface
