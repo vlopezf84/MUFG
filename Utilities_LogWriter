@@ -1,0 +1,19 @@
+Imports System.Web.Hosting
+
+Public Class LogWriter
+
+    Private ReadOnly _lock As Object = New Object
+
+    Public Sub WriteLog(ByVal message As String, ByVal target As [Enum])
+
+        SyncLock _lock
+            Dim streamWriter As IO.StreamWriter = New IO.StreamWriter(HostingEnvironment.MapPath("~/Logs/LogWCF_INE_RENAPO" + DateTime.Now.ToString("MMyyyy") + ".txt"), True)
+            streamWriter.WriteLine(DateTime.Now.ToString("dd MMM yyyy HH:mm") & " " & target.ToString & Chr(9) & Chr(9) & message)
+            streamWriter.Flush()
+            streamWriter.Close()
+            streamWriter.Dispose()
+        End SyncLock
+
+
+    End Sub
+End Class
