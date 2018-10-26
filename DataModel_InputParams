@@ -1,0 +1,80 @@
+<DataContract()> _
+Public Class InputParams
+    Private _CIC As String
+    <DataMember()> _
+    Public Property CIC() As String
+        Get
+            Return _CIC
+        End Get
+        Set(ByVal value As String)
+            _CIC = value
+        End Set
+    End Property
+
+    Private _OCR As String
+    <DataMember()> _
+    Public Property OCR() As String
+        Get
+            Return _OCR
+        End Get
+        Set(ByVal value As String)
+            _OCR = value
+        End Set
+    End Property
+
+    Private _ClaveElector As String
+    <DataMember()> _
+    Public Property ClaveElector() As String
+        Get
+            Return _ClaveElector
+        End Get
+        Set(ByVal value As String)
+            _ClaveElector = value
+        End Set
+    End Property
+
+    Private _NumEmision As String
+    <DataMember()> _
+    Public Property NumEmision() As String
+        Get
+            Return _NumEmision
+        End Get
+        Set(ByVal value As String)
+            _NumEmision = value
+        End Set
+    End Property
+
+    Private _Curp As String
+    <DataMember()> _
+    Public Property Curp() As String
+        Get
+            Return _Curp
+        End Get
+        Set(ByVal value As String)
+            _Curp = value
+        End Set
+    End Property
+
+    Private _ImgWSQ2 As String
+    <DataMember()> _
+    Public Property ImgWSQ2() As String
+        Get
+            Return _ImgWSQ2
+        End Get
+        Set(ByVal value As String)
+            _ImgWSQ2 = value
+        End Set
+    End Property
+
+    Private _ImgWSQ7 As String
+    <DataMember()> _
+    Public Property ImgWSQ7() As String
+        Get
+            Return _ImgWSQ7
+        End Get
+        Set(ByVal value As String)
+            _ImgWSQ7 = value
+        End Set
+    End Property
+
+End Class
