@@ -1,0 +1,129 @@
+Public Class MainHSM
+    Private Const gsPrefix As String = "CCC"
+
+    Public Function EncryptINEData(encryptedDataNode As String)
+        Dim lsRequest As String = String.Empty, lsResponse As String = String.Empty
+        Dim lsCommand As String = String.Empty, lsPkci As String = String.Empty, lsLengthKeyName As String = String.Empty
+        Dim lsKeyIndicator As String = String.Empty, lsAction As String = String.Empty, lsAlgorithmType As String = String.Empty, lsLengthEncryptedData As String
+        Try
+            Dim lsPublicKey As String = GetSetting("publicKeyINE")
+            Dim lsPort As String = GetSetting("PortHSM")
+            Dim lsIPServer As String = GetSetting("IPServerHSM")
+
+            lsCommand = "1002" 'RSA Encryption and Decryption v2 – 1002
+            lsPkci = "V" 'public key containment indicator. Indicates that the key is stored in DB
+            lsLengthKeyName = CStr(lsPublicKey.Length).PadLeft(4, "0")
+            lsKeyIndicator = "N00" 'indicates that the key is stored internally
+            lsAction = "0" 'Zero to indicate encryption
+            lsAlgorithmType = "1" 'OAEP
+            lsLengthEncryptedData = CStr(encryptedDataNode.Length).PadLeft(6, "0")
+
+            'Build complete command
+            lsRequest = lsCommand & lsPkci & lsLengthKeyName & lsPublicKey & lsKeyIndicator & lsAction & lsAlgorithmType & lsLengthEncryptedData & encryptedDataNode
+            'log.WriteLog("Comando para encriptar: " & lsRequest, LogTarget.Transaction_INE)
+            Debug.WriteLine("Petición: " + lsRequest)
+            lsResponse = SendMessageSocket(String.Empty, lsIPServer, lsPort, GenerateShipmentHSM(lsRequest))
+            Debug.WriteLine("Respuesta: " + lsResponse)
+            lsResponse = InterpretHSMResponse(lsResponse, lsCommand)
+        Catch ex As Exception
+            Throw New Exception("Error al encriptar datos HSM |" & ex.Message)
+        End Try
+        Return lsResponse
+    End Function
+
+    Public Function SignINEdata(signatureNode As String)
+        'Example
+        'XXX1103V0019MUFGdesarrollo_PRIVN00120101000064d216a204cb629a5521ac22964653f02950b36dd714f3168403140bfdf3607781
+
+        Dim lsRequest As String = String.Empty, lsResponse As String = String.Empty
+        Dim lsCommand As String = String.Empty, lsPkci As String = String.Empty, lsLengthKeyName As String = String.Empty
+        Dim lsKeyIndicator As String = String.Empty, lsHashMech As String = String.Empty, lsSignatureMec As String = String.Empty
+        Dim lsPaddingIndicator As String = String.Empty, lsLengthSignedData As String
+
+        Try
+            Dim lsPrivateKey As String = GetSetting("privateKeyMUFG")
+            Dim lsPort As String = GetSetting("PortHSM")
+            Dim lsIPServer As String = GetSetting("IPServerHSM")
+
+            lsCommand = "1103" 'RSA Encryption and Decryption v2 – 1002
+            lsPkci = "V" 'private key containment indicator. Indicates that the key is stored in DB
+            lsLengthKeyName = CStr(lsPrivateKey.Length).PadLeft(4, "0")
+            lsKeyIndicator = "N00" 'indicates that the key is stored internally
+            lsHashMech = "12" 'HASH mechanism, SHA256
+            lsSignatureMec = "01" 'Signature mechanism, RSA
+            lsPaddingIndicator = "01" 'Padding indicator of block to sign, pkcs#1 v1.5.
+
+            lsLengthSignedData = CStr(signatureNode.Length).PadLeft(6, "0")
+            'Build complete command
+            lsRequest = lsCommand & lsPkci & lsLengthKeyName & lsPrivateKey & lsKeyIndicator & lsHashMech & lsSignatureMec & lsPaddingIndicator & lsLengthSignedData & signatureNode
+            'log.WriteLog("Comando para firmar: " & lsRequest, LogTarget.Transaction_INE)
+            lsResponse = SendMessageSocketAsync(String.Empty, lsIPServer, lsPort, GenerateShipmentHSM(lsRequest))
+            lsResponse = InterpretHSMResponse(lsResponse, lsCommand)
+        Catch ex As Exception
+            Throw New Exception("Error al firmar datos HSM |" & ex.Message)
+        End Try
+        Return lsResponse
+    End Function
+
+
+    Private Function InterpretHSMResponse(lsResponse As String, lsCommand As String)
+        Dim responseCode As String = String.Empty, result As String = String.Empty
+
+        Try
+            Dim liTotalLenght As UInt16 = Convert.ToUInt16(lsResponse.Substring(0, 6))
+            lsResponse = lsResponse.Substring(6)
+            If (liTotalLenght = lsResponse.Length) Then
+
+                lsResponse = lsResponse.Substring(gsPrefix.Length)
+                lsResponse = lsResponse.Substring(lsCommand.Length)
+
+                'lsResponse = lsResponse.Replace(gsPrefix, String.Empty)
+                'lsResponse = lsResponse.Replace(lsCommand, String.Empty)
+
+                responseCode = lsResponse.Substring(0, 8)
+
+                If responseCode = "00000000" Then
+                    Dim length As UInt16 = lsResponse.Substring(8, 6)
+                    result = lsResponse.Substring(14)
+                    If length <> result.Length Then
+                        Throw New Exception("Error en la respuesta del HSM | HSM no devolvió cadena completa: " & result)
+                    End If
+                Else
+                    Throw New Exception("Error en la respuesta del HSM | Código devuelto: " & responseCode)
+                End If
+            Else
+                Throw New Exception("Error en la respuesta del HSM | Error al comparar el tamaño de la cadena devuelta")
+            End If
+        Catch ex As Exception
+            Throw New Exception("Error al interpretar resultado HSM |" & ex.Message)
+        End Try
+        Return result
+    End Function
+
+    Private Function SendMessageSocketAsync(originClient As String, server As String, port As Integer, message As String)
+        Dim lsReturn As String
+        Using loEnvio As AsynchronousClient = New AsynchronousClient(originClient, server, port, message)
+            lsReturn = loEnvio.getResponse()
+        End Using
+        'log.WriteLog("Respuesta HSM: " & lsReturn, LogTarget.Transaction_INE)
+        Return lsReturn
+    End Function
+
+    Private Function SendMessageSocket(originClient As String, server As String, port As Integer, message As String)
+        Dim lsReturn As String
+        Dim loEnvio As SynchronousClient = New SynchronousClient()
+        lsReturn = loEnvio.getResponse(server, port, message)
+
+        'log.WriteLog("Respuesta HSM: " & lsReturn, LogTarget.Transaction_INE)
+        Return lsReturn
+    End Function
+
+    Private Function GenerateShipmentHSM(request As String) As String
+        Dim lsSendMessage As String, liLargo As UInteger
+
+        lsSendMessage = gsPrefix & request
+        liLargo = Len(lsSendMessage)
+        Return CStr(liLargo).PadLeft(6, "0") & lsSendMessage
+    End Function
+
+End Class
