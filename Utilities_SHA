@@ -1,0 +1,59 @@
+Imports System.Text
+Imports System.Security.Cryptography
+
+Public Class SHA
+    Public Shared Function GenerateSHA256String(ByVal inputString) As String
+        Dim stringBuilder As New StringBuilder()
+        Try
+            Dim sha256 As SHA256 = SHA256Managed.Create()
+            Dim bytes As Byte() = Encoding.UTF8.GetBytes(inputString)
+            Dim hash As Byte() = sha256.ComputeHash(bytes)
+
+
+            For i As Integer = 0 To hash.Length - 1
+                StringBuilder.Append(hash(i).ToString("X2"))
+            Next
+        Catch ex As Exception
+            Throw New Exception("Error GenerateSHA256String |" & ex.Message)
+        End Try
+        Return stringBuilder.ToString()
+    End Function
+
+    Private Shared Function ToHex(ByVal bytes As Byte(), ByVal upperCase As Boolean) As String
+        Dim result As StringBuilder = New StringBuilder(bytes.Length * 2)
+
+        Try
+            For i As Integer = 0 To bytes.Length - 1
+                result.Append(bytes(i).ToString(If(upperCase, "X2", "x2")))
+            Next
+        Catch ex As Exception
+            Throw New Exception("Error ToHex |" & ex.Message)
+        End Try
+        Return result.ToString()
+    End Function
+
+    Public Shared Function SHA256HexHashString(ByVal StringIn As String) As String
+        Dim hashString As String
+
+        Using sha256 = SHA256Managed.Create()
+            Dim hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(StringIn))
+            hashString = ToHex(hash, True)
+        End Using
+
+        Return hashString
+    End Function
+
+    Public Shared Function GenerateSHA512String(ByVal inputString) As String
+        Dim sha512 As SHA512 = SHA512Managed.Create()
+        Dim bytes As Byte() = Encoding.UTF8.GetBytes(inputString)
+        Dim hash As Byte() = sha512.ComputeHash(bytes)
+        Dim stringBuilder As New StringBuilder()
+
+        For i As Integer = 0 To hash.Length - 1
+            stringBuilder.Append(hash(i).ToString("X2"))
+        Next
+
+        Return stringBuilder.ToString()
+    End Function
+
+End Class
