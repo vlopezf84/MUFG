@@ -1,0 +1,83 @@
+Imports System.ServiceModel.Web
+Imports System.ServiceModel
+Imports System.Runtime.Serialization
+Imports System.IO
+Imports System.Web.Script.Serialization
+Imports System.Threading
+Imports System.Threading.Tasks
+
+Public Class ServiceData
+    Implements IServiceData
+    Private log As LogWriter
+
+    Public Sub New()
+        log = New LogWriter()
+    End Sub
+
+
+    Public Function PostValidation(ByVal value As InputParams) As OutputParams Implements IServiceData.PostValidation
+        log.WriteLog("Inicio del proceso", LogTarget.Transaction_GRAL)
+
+        Dim result As OutputParams = New OutputParams()
+        Dim dataReceived As InputParams = New InputParams()
+        Dim messageMinutiae As String = String.Empty
+
+        'Solo para validar que se esten leyendo los datos correctamente segun llegan
+        With dataReceived
+            .ClaveElector = value.ClaveElector
+            .CIC = value.CIC
+            .NumEmision = value.NumEmision
+            .OCR = value.OCR
+            .Curp = value.Curp
+            .ImgWSQ2 = value.ImgWSQ2
+            .ImgWSQ7 = value.ImgWSQ7
+        End With
+
+        With result
+            .ClaveElector = "0"
+            .RespuestaINE = False
+            .AsertividadID = "0%"
+            .AsertividadII = "0%"
+        End With
+
+        Dim messageEmpty = ValidateEmptyParameters(dataReceived.CIC, dataReceived.ClaveElector, dataReceived.NumEmision, dataReceived.OCR)
+        Dim messageFormat = ValidateParameters(dataReceived.CIC, dataReceived.ClaveElector, dataReceived.NumEmision, dataReceived.OCR)
+        If String.IsNullOrEmpty(dataReceived.ImgWSQ2) And String.IsNullOrEmpty(dataReceived.ImgWSQ7) Then
+            messageMinutiae = "Se requiere al menos una minucia"
+        End If
+
+
+        If Not String.IsNullOrEmpty(messageEmpty) Or Not String.IsNullOrEmpty(messageFormat) Or Not String.IsNullOrEmpty(messageMinutiae) Then
+            result.ErrorConnection = messageEmpty + messageFormat + messageMinutiae
+            log.WriteLog("Se rechazó la petición por datos de entrada erróneos: " + result.ErrorConnection, LogTarget.Transaction_GRAL)
+        Else
+            If String.IsNullOrEmpty(dataReceived.Curp) Then
+                log.WriteLog("Se comienza el proceso sin CURP", LogTarget.Transaction_GRAL)
+                result = INE_Called(dataReceived)
+                result.RespuestaRENAPO = False
+            Else
+                If ValidateCURP(dataReceived.Curp) Then
+                    log.WriteLog("Se comienza el proceso con CURP", LogTarget.Transaction_GRAL)
+                    Dim respuestaRenapo As Boolean
+                    '#Region "Tareas Paralelas"
+                    ' Se ejecutan las consultas al INE y a RENAPO
+                    Parallel.Invoke(Sub()
+                                        respuestaRenapo = RENAPO_Called(dataReceived.Curp)
+                                        ' Fin de la llamada a RENAPO
+                                    End Sub,
+                        Sub()
+                            result = INE_Called(dataReceived)
+                            'Fin de la llamada a INE
+                        End Sub)
+                    '#End Region
+                    result.RespuestaRENAPO = respuestaRenapo
+                Else
+                    result.RespuestaRENAPO = False
+                    result.ErrorConnection = "Error en la CURP: No cumple con el formato"
+                    log.WriteLog("Error en la CURP: No cumple con el formato", LogTarget.Transaction_RENAPO)
+                End If
+            End If
+        End If
+        Return result
+    End Function
+End Class
