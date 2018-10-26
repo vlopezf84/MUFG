@@ -1,0 +1,70 @@
+<DataContract()> _
+Public Class OutputParams
+    Private _ClaveElector As String
+    <DataMember()> _
+    Public Property ClaveElector() As String
+        Get
+            Return _ClaveElector
+        End Get
+        Set(ByVal value As String)
+            _ClaveElector = value
+        End Set
+    End Property
+
+    Private _RespuestaINE As Boolean
+    <DataMember()> _
+    Public Property RespuestaINE() As Boolean
+        Get
+            Return _RespuestaINE
+        End Get
+        Set(ByVal value As Boolean)
+            _RespuestaINE = value
+        End Set
+    End Property
+
+    Private _RespuestaRENAPO As Boolean
+    <DataMember()> _
+    Public Property RespuestaRENAPO() As Boolean
+        Get
+            Return _RespuestaRENAPO
+        End Get
+        Set(ByVal value As Boolean)
+            _RespuestaRENAPO = value
+        End Set
+    End Property
+
+    Private _AsertividadID As String
+    <DataMember()> _
+    Public Property AsertividadID() As String
+        Get
+            Return _AsertividadID
+        End Get
+        Set(ByVal value As String)
+            _AsertividadID = value
+        End Set
+    End Property
+
+    Private _AsertividadII As String
+    <DataMember()> _
+    Public Property AsertividadII() As String
+        Get
+            Return _AsertividadII
+        End Get
+        Set(ByVal value As String)
+            _AsertividadII = value
+        End Set
+    End Property
+
+    Private _ErrorConnection As String
+    <DataMember()> _
+    Public Property ErrorConnection() As String
+        Get
+            Return _ErrorConnection
+        End Get
+        Set(ByVal value As String)
+            _ErrorConnection = value
+        End Set
+    End Property
+
+
+End Class
