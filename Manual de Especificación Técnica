@@ -1,0 +1,288 @@
+
+
+
+
+
+
+
+
+
+
+Manual de Especificación Técnica 
+Comunicación INE-RENAPO
+Antirrobo de Identidad
+
+
+
+
+
+	
+
+ 
+
+Tabla de contenido
+
+Resumen general del requerimiento	3
+Especificaciones técnicas	4
+Diagrama del proceso principal	7
+Descripción del proceso principal	8
+ANEXO 1	11
+Proceso para la transformación de datos y su envío al HSM	11
+ANEXO 2	14
+Generación de comandos HSM	14
+ANEXO 3	17
+Consideraciones al establecer la comunicación con las instituciones	17
+
+
+
+ 
+Resumen general del requerimiento 
+
+Se desarrolló un Servicio Web (REST) que permite la verificación biométrica del INE y la validación de la CURP en RENAPO. Este servicio es capaz de recibir y responder una petición en formato JSON bajo el método HTTP POST. La petición contiene el siguiente formato y campos:
+ 
+Imagen 1 - Formato de petición JSON
+Una vez que se recibe la petición, el servicio bifurca dos procesos: uno para la consulta con RENAPO y otro para la consulta con el INE. Para ambos casos se establece comunicación con las respectivas instituciones siguiendo los protocolos que dictaminen y se hace la consulta para obtener el resultado de la comparación de los datos que se envían, es decir, se informa si son datos válidos. Después de realizar la consulta se regresa el resultado obtenido. Esta respuesta en formato JSON contiene la siguiente información:
+ 
+Imagen 2 - Resultado de consulta
+
+Como se puede observar, existen dos campos (Respuesta INE, Respuesta RENAPO) que indican si la comparación realizada fue exitosa, es decir, si lo datos son válidos. Se incluyen además los campos de asertividad para determinar el porcentaje de validez en cuanto a la comparación biométrica de los dedos índices registrados por el INE y un campo adicional que indicará si existió un error al realizar la consulta. El campo “Clave Elector” solo sirve como referencia para reconocer el movimiento que se está realizando.
+
+Especificaciones técnicas	
+
+La comunicación entre el banco y las instituciones mencionadas se lleva a cabo por medio de un servicio desarrollado en la plataforma WCF de .NET. 
+El servicio se encuentra alojado en el servidor de producción: 
+	
+IP Servidor	172.16.5.46
+Nombre servidor	MXDF01DBS008
+
+Las especificaciones respecto al desarrollo realizado se describen a continuación:
+	
+Nombre de la solución	MUFG_wcfEnrolamiento
+Plataforma	WCF
+Framework	.NET v4.0
+	
+
+Estructura del desarrollo
+El proyecto se encuentra organizado en cuatro carpetas que contienen clases y módulos. 
+•	DataModel: Contiene clases que representan los parámetros de entrada y salida del servicio. Estas clases son representadas en formato JSON para el transporte de los datos.
+ 
+Imagen 3 - Carpeta DataModel
+
+•	DataModelINE: Contiene las clases que son usadas para la implementación de la estructura JSON que el INE establece para hacer peticiones. Las clases, internamente, se encuentran jerárquicamente implementadas para obtener el orden requerido. 
+ 
+Imagen 4 – Carpeta DataModel INE
+•	HSM: En esta carpeta están incluidas las clases con los respectivos métodos que se encargan de realizar la conexión con el HSM. En la clase principal se arman los comandos que son enviados para el cifrado y la firma de los datos. Se tiene la alternativa de realizar el llamado asíncrono o síncrono según se requiera. La implementación actual realiza peticiones asíncronas.
+
+ 
+Imagen 5 - Carpeta HSM
+•	Utilities: La carpeta “Utilities” contiene los archivos de uso común para el desarrollo. En esta se encuentra implementado la clase para el uso del log y los algoritmos de conversión y cifrado.
+ 
+Imagen 6 - Carpeta Utilities
+Adicional a las carpetas anteriormente descritas se tienen las clases que genera automáticamente el framework para WCF y aquella creada para correr el proceso principal.
+ 
+Imagen 7 - Clases adicionales
+
+
+
+
+
+ 
+
+
+Diagrama del proceso principal
+
+ 
+Descripción del proceso principal
+El proceso principal se realiza gestionando la salida de dos subprocesos: uno de ellos destinado a realizar la petición al RENAPO, el otro al INE. El servicio recibe los parámetros requeridos y se encarga de validarlos de acuerdo a las especificaciones que se muestran a continuación.
+Si la consulta es con CIC	 Especificación
+*CIC	9 caracteres
+**WSQ2	Información enviada en BASE64
+**WSQ7	Información enviada en BASE64
+ 	 
+Si la consulta no es con  CIC	 
+*OCR	13 caracteres
+*Número Emisión Credencial	2 caracteres
+*Clave Elector	18 caracteres
+**WSQ2	Información enviada en BASE64
+**WSQ7	Información enviada en BASE64
+ 	 
+*Obligatorios	 
+**Obligatorio al menos uno de los dos	 
+Tabla 1 – Parámetros INE
+CURP	18 caracteres (validado con expresión regular
+Tabla 2 – Parámetro RENAPO
+Una vez validados, la aplicación realiza la consulta a cada una de las instituciones. Cuando se recibe la respuesta, se arma un resultado conjunto con la finalidad de contestar a la petición hecha al servicio.
+RENAPO
+En el proceso de la consulta con RENAPO se siguieron las especificaciones proporcionadas en el “Anexo Técnico IP” que se resumen en lo siguiente:
+1.	Descargar e instalar del certificado que provee el RENAPO
+2.	Generar la referencia del servicio 
+3.	Instanciar la clase que se ocupará
+ 
+Imagen 8 – Instancia de la clase de RENAPO
+4.	Llenar los parámetros que serán enviados a la consulta, entre ellos usuario, contraseña y dirección IP, mismos que se reciben de la institución al realizar el trámite necesario para la consulta de los datos.
+ 
+Imagen 9 - Establecimiento de parámetros RENAPO
+5.	Realizar la consulta.
+ 
+Imagen 10 - Consulta a RENAPO
+6.	Interpretar la respuesta. RENAPO devuelve información en formato XML, por lo que se hizo uso de la  clase XDocument para tener acceso al dato de interés de la respuesta recibida.
+ 
+Imagen 11 - Interpretación de la respuesta de RENAPO
+INE
+El documento SVCV_Especificaciones_tecnicas_v4_2 proporciona la información detallada para llevar a cabo la consulta sobre los datos personales del usuario. El código desarrollado sigue los pasos a continuación señalados:
+1.	Se genera la estructura JSON especificada. Para esto se hace uso de una estructura de clases que permite la jerarquización. La librería ocupada para hacer la conversión y manipulación del JSON es Newtonsoft.Json.
+2.	Se llenan los datos del usuario (el nodo es llamado “datosCifrados”).
+3.	Se toma el nodo “datosCifrados” y, después de aplicar el formato adecuado, se envía al HSM para su cifrado (ver Anexos 1 y 2). La respuesta que regresa el HSM se sobrescribe en el mismo nodo.
+4.	Se llenan los datos generales de la consulta, tales como los algoritmos a utilizar, la ciudad, el estado, el código postal, etc.
+ 
+Imagen 12 - Llenado de datos generales
+5.	Se toman los nodos “data” y “timeStamp”, y después de aplicar el formato adecuado se obtiene su SHA256. El resultado se coloca en la propiedad “digestValue”. El SHA256 también es enviado al HSM para aplicar la firma digital. Este último resultado es asignado al campo “signatureValue”.
+6.	Se confirma que la estructura JSON requerida ha sido completada y se realiza la petición al INE por medio del método POST, enviando el certificado en la consulta (previamente proporcionado por la institución - ver Anexo 3).
+7.	Se hace una interpretación de la respuesta obtenida; para esto se hace uso de la clase JObject.
+ 
+Imagen 13 - Interpretación de la respuesta del INE
+
+
+
+
+
+
+
+
+
+
+
+
+ANEXO 1
+Proceso para la transformación de datos y su envío al HSM
+
+CIFRADO
+Según el SVCV_Especificaciones_tecnicas_v4_2 otorgado por el INE, el nodo de la estructura JSON (donde vienen los datos del cliente) se debe cifrar con la llave pública de dicha institución.
+Para realizar esto con los servidores HSM es necesario extraer dicho nodo…
+{"ocr":"","cic":"","nombre":"","apellidoPaterno":"","apellidoMaterno":"","anioRegistro":"","anioEmision":"","numeroEmisionCredencial":"","claveElector":"","curp":""}
+…y convertirlo a formato hexadecimal. La cadena que se obtiene tendrá una apariencia similar a la siguiente:
+7B226F6372223A2235343135303833303634313937222C22636963223A22313638343838343033222C226E6F6D627265223A22564943454E5445204C554953222C226170656C6C69646F50617465726E6F223A2250415449D14F222C226170656C6C69646F4D617465726E6F223A2247414C49434941222C22616E696F526567697374726F223A2231393934222C22616E696F456D6973696F6E223A2231393931222C226E756D65726F456D6973696F6E43726564656E6369616C223A223030222C22636C617665456C6563746F72223A224A4D4E4A5247393530353131303148303030222C2263757270223A224341435235393037333148444653524C3032227D
+Utilizando el comando adecuado, la cadena obtenida se envía al HSM (ver Anexo 2)
+XXX1002V0010PublicaINEN00010005167B226F6372223A2235343135303833303634313937222C22636963223A22313638343838343033222C226E6F6D627265223A22564943454E5445204C554953222C226170656C6C69646F50617465726E6F223A2250415449D14F222C226170656C6C69646F4D617465726E6F223A2247414C49434941222C22616E696F526567697374726F223A2231393934222C22616E696F456D6973696F6E223A2231393931222C226E756D65726F456D6973696F6E43726564656E6369616C223A223030222C22636C617665456C6563746F72223A224A4D4E4A5247393530353131303148303030222C2263757270223A224341435235393037333148444653524C3032227D
+Otro ejemplo (Desde .NET)
+000539XXXX1002V0019Public_Key_INE_2018N00010004967B226F6372223A2230373836313139393133383238222C22636963223A22343835373032313535222C226E6F6D627265223A22535553414E41222C226170656C6C69646F50617465726E6F223A2244414E49454C222C226170656C6C69646F4D617465726E6F223A224352555A222C22616E696F526567697374726F223A2232303037222C22616E696F456D6973696F6E223A2232303036222C226E756D65726F456D6973696F6E43726564656E6369616C223A2235222C22636C617665456C6563746F72223A22485339323234323830364D4C4F5259373844222C2263757270223A22485552533934323830364D4C4F5259443030227D
+La respuesta obtenida por el HSM se convierte en un arreglo de bytes y posteriormente se pasa a BASE64. Esto se coloca en el nodo del INE llamado datosCifrados.
+FIRMA
+Es requerido también la firma de los nodos “data” y “timeStamp”. Según lo especificado, se crea una sola línea con dichos nodos. Inicialmente se obtiene el SHA256 de los datos a firmar, ya que  con esta información se forma el comando que se va a enviar al HSM.
+
+EJEMPLO:
+Se tiene el nodo de “data” y nodo “timeStamp” unidos:
+{"datosCifrados":"NfxGQGSQsI0NLCl3FBaDv3xElkBoQFCClkRolOkMag4N24tHk/yYqjaQZxGVJilU16a5CvKAJ6b64ABlHLKKSP9v0/pdGHJ+Smueb4dc1W8qQpWkDXSG+EzluBY0yTSdSQRmf8glZZFxhwosjzK/IX/ZOIx5iRMva1bn8fG/23E73cQWU8xf76KJT16wsvXseZuhvjdaIaoRgzv27oNzo06LapniUAov5fZoujqVzD/2dXTyR3TdSzTMMLiTFJNIY3y1W101E/ftnQuGtwN+FZ201o+3HLWcZtSQQ+6DR9CQiE26KFim2ad5M3Gt+yfRCIdizIu/kQYV3GwB6lACA8v2s8n32sZUk3g5m/s0LA/sw4eLiN1W1QeGtDG+mrhwalcKDVCYcDKsQg9RYVx0bUZvjV2LTiDsVVyEn8T8V5HSdX/1FqSKMZIrKRyUXn7lD+tAJf0zR8DCBGu89HPTx2qHDhuWHCw3hqIHsf948o0XRT74QaVLXuThmiaz/T8nORAsKBspEesTC8uL46iS7SQMJXpofsQQzvE2pZQPQdvXoiqjwFvOv4uB/20qb88zb/DKogPZ4Z34a+G+0K7uJgbo1HIl7dNvcKmpzKmbZGQxX6ytD2p+jDldCvhEtRASMgQni3darSI18Mr4SYbkoEEGoUCzE+TTJH/Z5JNUhmI=","minucias":null,"ubicacion":{"posicionSatelital":{"latitud":20.6484676,"longitud":-100.1792029},"localidad":{"codigoPostal":"00000","ciudad":"México","estado":15}},"consentimiento":true}{"momento":"20180725113026Z","indice":"2f00000000201705120000000000000000000000000097739141481428","numeroSerie":"58.be.0e.58.16.82.6a.70.79.2b.b0.a1.f5.a8.84.8c"}
+Tal cual como se ve, se obtiene su SHA256
+D216A204CB629A5521AC22964653F02950B36DD714F3168403140BFDF3607781       o en su versión de letras minúsculas
+d216a204cb629a5521ac22964653f02950b36dd714f3168403140bfdf3607781
+Utilizando el comando correcto del HSM se solicita la firma:
+000103XXXX1103V0011DS_PRIV_KEYN00120101000064d216a204cb629a5521ac22964653f02950b36dd714f3168403140bfdf3607781
+NOTA ADICIONAL: Este resultado (el de la conversión de los nodos al SHA256) es el que también se coloca en el campo digestValue.
+El HSM procesa el comando y regresa su respuesta en formato hexadecimal, mismo que se convierte a BASE64 antes del envío al INE.
+Un ejemplo final de cómo quedarían los datos es el siguiente:
+{"data":
+{"datosCifrados":"NfxGQGSQsI0NLCl3FBaDv3xElkBoQFCClkRolOkMag4N24tHk/yYqjaQZxGVJilU16a5CvKAJ6b64ABlHLKKSP9v0/pdGHJ+Smueb4dc1W8qQpWkDXSG+EzluBY0yTSdSQRmf8glZZFxhwosjzK/IX/ZOIx5iRMva1bn8fG/23E73cQWU8xf76KJT16wsvXseZuhvjdaIaoRgzv27oNzo06LapniUAov5fZoujqVzD/2dXTyR3TdSzTMMLiTFJNIY3y1W101E/ftnQuGtwN+FZ201o+3HLWcZtSQQ+6DR9CQiE26KFim2ad5M3Gt+yfRCIdizIu/kQYV3GwB6lACA8v2s8n32sZUk3g5m/s0LA/sw4eLiN1W1QeGtDG+mrhwalcKDVCYcDKsQg9RYVx0bUZvjV2LTiDsVVyEn8T8V5HSdX/1FqSKMZIrKRyUXn7lD+tAJf0zR8DCBGu89HPTx2qHDhuWHCw3hqIHsf948o0XRT74QaVLXuThmiaz/T8nORAsKBspEesTC8uL46iS7SQMJXpofsQQzvE2pZQPQdvXoiqjwFvOv4uB/20qb88zb/DKogPZ4Z34a+G+0K7uJgbo1HIl7dNvcKmpzKmbZGQxX6ytD2p+jDldCvhEtRASMgQni3darSI18Mr4SYbkoEEGoUCzE+TTJH/Z5JNUhmI=",
+"minucias":null,
+"ubicacion":
+{"posicionSatelital":
+{"latitud":20.6484676,
+"longitud":100.1792029},
+"localidad":
+{"codigoPostal":"00000",
+"ciudad":"México",
+"estado":15}
+},
+"consentimiento":true
+},
+"signature":{
+"signedInfo":{
+"canonicalizationMethod":{"algorithm":"http://www.w3.org/TR/2001/REC-xml-c14n-20010315"},
+"signatureMethod":{"algorithm":"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"},
+"reference":{"digestMethod":{"algorithm":"http://www.w3.org/2001/04/xmlenc#sha256"},
+"digestValue":"d216a204cb629a5521ac22964653f02950b36dd714f3168403140bfdf3607781","uri":"#DATA"}
+},
+"signatureValue":"b2ZYohJinE377prthLtsOwfU1o1W2KiUk0lL01yUN81BsXbyB0blcLeZ5xuNpGgr2DiubfUe8gGVaIBP5keMtsudz/qTG6p+wyvJkKC9Als4MK+ZEsE3/8autE3AneLJ1d5qW8+iHJz5JsMnBs5YwIjhmuGTAq5eKthw0scbEgGEC3mimbuJan3N5pW/LgU+IuQWlYXe9FvZSXoj3Dtj3QubL44RzjovxMk9BunXuVWEPgzphYqJN1arMunIhRTS5yRHDzFaeXFGu4EtFAVgHw6AgCBI+KgywyY10DOatkgNi6WuVrqyqaz1bluBSiBmh2/66OQuHFu1F+lh5G/1jg==",
+"keyInfo":{"x509Data":{"x509SerialNumber":"86"}
+}
+},
+"timeStamp":{
+"momento":"20180725113026Z",
+"indice":"2f00000000201705120000000000000000000000000097739141481428",
+"numeroSerie":"58.be.0e.58.16.82.6a.70.79.2b.b0.a1.f5.a8.84.8c"}
+}
+
+
+
+
+
+
+
+ANEXO 2
+Generación de comandos HSM
+
+El uso de los servidores HSM para la comunicación con el INE se delimitará a 2 momentos dentro del proceso:
+•	En el cifrado de datos
+•	En la firma de los datos
+
+Cifrado de datos
+Se deberá proveer al HSM una cadena en formato HEX. Esta cadena originalmente corresponde a los datos del cliente en el formato solicitado. El comando que permitirá cifrar los datos mediante la llave pública del INE es el siguiente:
+Como se puede observar, los campos tales como la longitud de la llave, el nombre de la llave, la longitud de los datos y los datos en HEX, varían dependiendo del nombre asignado a la llave y de los datos en sí.
+El comando para el cifrado es el 1002 y los parámetros a proveer se mandarán tal y como se muestran en la imagen. La longitud de cada parámetro en el comando se muestra marcada en color rojo y no es variable salvo los casos en donde se indique con una ‘(V)’. De igual forma, se entiende que el valor de los campos de “longitud” depende totalmente del tamaño del campo inmediato posterior.
+El HSM devolverá la información que tendrá que ser convertida a base 64 y posteriormente ser enviada al INE.
+
+Este es un ejemplo funcional del comando para cifrar:
+Un ejemplo funcional es el siguiente:
+
+
+
+
+
+Cuya respuesta es la siguiente:
+
+
+
+
+
+
+
+
+
+
+Nota: Se debe tener cuidado especial al momento de ingresar el nombre de la llave, pues se respeta el uso de mayúsculas y minúsculas.
+
+
+
+
+
+Firma de datos
+Para el caso de la firma de datos, se deberá enviar al HSM una cadena en formato SHA256. Para este caso el SHA256 deberá formarse fuera del HSM.  El comando a ocupar es el 1103 cuya configuración de parámetros se muestra en la siguiente imagen:
+El ejemplo anterior muestra el envío del comando mediante una aplicación desarrollada en .NET. Todos los parámetros se deberán mantener con la configuración que se muestra en la imagen, respetando la longitud de cada uno, salvo aquellos que varían, por ejemplo, las longitudes o el nombre de la llave.
+Un ejemplo real del comando enviado es el siguiente:
+
+
+La respuesta regresada por el HSM es:
+
+
+
+
+
+
+ANEXO 3
+Consideraciones al establecer la comunicación con las instituciones
+
+En el siguiente anexo se especifica el proceso que se llevó a cabo para la transferencia de información con el RENAPO e INE en la parte del desarrollo del servicio web. Cabe hacer mención que las especificaciones técnicas respecto a la infraestructura quedan fuera del alcance del presente, es decir, solo  se abordará el proceso seguido una vez que se estableció la comunicación con dichas instituciones según la vía que se haya determinado.
+RENAPO
+El RENAPO expone un servicio web para consultar los datos a través de la CURP. Previo a realizar la consulta, se requiere la instalación del certificado que la institución proporciona cuando se logra el acceso a su servicio. Dicho servicio es consumido desde la plataforma .Net creando una referencia al mismo. Al generar una instancia de la clase ConsultaPorCurpServicePortTypeClient se tiene acceso a los métodos requeridos para la consulta. Antes de realizar la petición se deberán establecer los parámetros requeridos. Para esto, se hace uso de la clase DatosConsultaCurp que, una vez instanciada, se envía como parámetro del método a utilizar (en este caso, consultarPorCurp). La respuesta es regresada en formato XML por lo que es necesario interpretarla para obtener el resultado específico.
+ 
+
+ 
+
+INE
+Una vez que sea habilitado el canal de comunicación con el INE, es necesaria la instalación del certificado que proporcionó dicha institución. Si es el caso, se deberá también habilitar los permisos para que se tenga acceso al certificado una vez que se monta el desarrollo en un servidor de aplicaciones.
+En este caso se detallan los pasos a seguir para habilitar la comunicación en ambientes Windows con IIS como servidor de aplicaciones. 
+1.	Se deberá crear un archivo .pfx con el certificado y la llave privada del servidor (se puede hacer uso del software OpenSSL)
+2.	Posteriormente es necesario instalar el .pfx. En entornos Windows se hace uso de la herramienta MMC en su sección para administrar certificados. En esta parte se deberá seleccionar la opción de inicio en modo “Local machine”. 
+3.	Se elige la opción de certificados personales y finalmente se importa el archivo .pfx. Con este paso, el certificado se encuentra disponible para su uso o bien, se vuelve visible en el IIS. Si la consulta al INE se hará desde una aplicación web, se ejecuta el siguiente paso.
+4.	Se otorgan permisos al pool de aplicaciones. Esto se realizará accediendo a las propiedades del certificado desde la herramienta para administrarlos. Se elige la opción  “Todas las tareas” y finalmente “Administración de llaves privadas”. Esto habilita la opción para agregar usuarios que tendrán permisos. En este caso se agrega "IIS AppPool\<Nombre del pool de aplicaciones>"
+A diferencia del RENAPO, la consulta al INE se realiza por medio de un servicio REST, es decir, por medio del método POST se envía una petición a la liga que es proporcionada por la institución. Es necesario aclarar que previamente se tuvo que establecer el canal de comunicación con el certificado que se proporciona, ya que en el momento de realizar la petición es necesario adjuntarlo.
