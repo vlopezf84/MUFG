@@ -1,0 +1,111 @@
+Imports System.Configuration
+Imports System.IO
+
+
+Module UtilitiesModule
+
+    Public Enum LogTarget
+        Transaction_GRAL
+        Transaction_INE
+        Transaction_RENAPO
+        ErrorL
+    End Enum
+
+    'Get settings from Web.Config
+    Function GetSetting(ByVal key As String)
+        Dim result As String = Nothing
+        Try
+            If Not String.IsNullOrEmpty(ConfigurationManager.AppSettings(key)) Then
+                result = ConfigurationManager.AppSettings(key).ToString
+            End If
+        Catch ex As Exception
+            Throw New Exception("Error GetSetting|" & ex.Message)
+        End Try
+        Return result
+    End Function
+
+    Public Function ConvertStringToHex(ByVal asciiString As String) As String
+        Dim hex As String = String.Empty
+
+        Try
+            For Each c As Char In asciiString
+                Dim tmp As Integer = AscW(c)
+                hex += String.Format("{0:x2}", CUInt(System.Convert.ToUInt32(tmp.ToString())))
+            Next
+        Catch ex As Exception
+            Throw New Exception("Error ConvertStringToHex |" & ex.Message)
+        End Try
+        Return hex
+    End Function
+
+    Function HexString2B64(ByVal input As String) As String
+        Dim result As String = String.Empty
+        Try
+            result = System.Convert.ToBase64String(HexStringtoHex(input))
+        Catch ex As Exception
+            Throw New Exception("Error HexString2B64 |" & ex.Message & "|Cadena: " & input & "|Cadena Length: " & input.Length)
+        End Try
+        Return result
+    End Function
+
+    Function HexStringtoHex(ByVal inputHex As String) As Byte()
+        Try
+            Dim result = New Byte(inputHex.Length / 2 - 1) {}
+
+            For i = 0 To result.Length - 1
+                result(i) = System.Convert.ToByte(inputHex.Substring(i * 2, 2), 16)
+            Next
+            Return result
+        Catch ex As Exception
+            Throw New Exception("Error HexStringtoHex |" & ex.Message)
+        End Try
+
+    End Function
+
+    Function ValidateEmptyParameters(ByVal CIC As String, ByVal claveElector As String, ByVal numEmision As String, ByVal OCR As String) As String
+        Dim message As String = String.Empty
+        Try
+            If String.IsNullOrEmpty(CIC) Then
+                If String.IsNullOrEmpty(claveElector) Or String.IsNullOrEmpty(numEmision) Or String.IsNullOrEmpty(OCR) Then
+                    message = "Campos obligatorios vacíos|"
+                End If
+            End If
+        Catch ex As Exception
+            Throw New Exception("Error al validar parámetros vacíos|" & ex.Message)
+        End Try
+        Return message
+    End Function
+
+    Function ValidateParameters(ByVal CIC As String, ByVal claveElector As String, ByVal numEmision As String, ByVal OCR As String) As String
+        Dim message As String = String.Empty
+        Try
+            If String.IsNullOrEmpty(CIC) Then
+                If claveElector.Length <> 18 Then
+                    message += "ClaveElector incompleta|"
+                End If
+                If numEmision.Length <> 2 Then
+                    message += "NumEmision incompleto|"
+                End If
+                If OCR.Length <> 13 Then
+                    message += "OCR  incompleto|"
+                End If
+            Else
+                If CIC.Length <> 9 Then
+                    message += "CIC incompleto|"
+                End If
+            End If
+        Catch ex As Exception
+            Throw New Exception("Error al validar parámetros |" & ex.Message)
+        End Try
+        Return message
+    End Function
+
+    Function ValidateCURP(CURP As String) As Boolean
+        Dim pattern As Regex = New Regex("^[a-zA-Z]{4}\d{6}[a-zA-Z]{6}\d{2}$")
+        If pattern.IsMatch(CURP) Then
+            Return True
+        Else
+            Return False
+        End If
+    End Function
+End Module
