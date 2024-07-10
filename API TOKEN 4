@@ -69,13 +69,20 @@ Public Sub Main()
 
     ' Obtener el token
     apiClient.GetToken(tokenUrl, username, password).ContinueWith(Sub(tokenTask)
-                                                                      Dim token = tokenTask.Result
-                                                                      ' Consumir la API usando el token
-                                                                      Dim bodyContent As String = "{""key"": ""value""}"
-                                                                      apiClient.CallApiMethod(apiUrl, token, bodyContent).ContinueWith(Sub(responseTask)
-                                                                                                                                         Dim response = responseTask.Result
-                                                                                                                                         Console.WriteLine(response)
-                                                                                                                                     End Sub)
+                                                                      If tokenTask.IsCompleted AndAlso Not tokenTask.IsFaulted Then
+                                                                          Dim token = tokenTask.Result
+                                                                          ' Consumir la API usando el token
+                                                                          Dim bodyContent As String = "{""key"": ""value""}"
+                                                                          apiClient.CallApiMethod(apiUrl, token, bodyContent).ContinueWith(Sub(responseTask)
+                                                                                                                                                 If responseTask.IsCompleted AndAlso Not responseTask.IsFaulted Then
+                                                                                                                                                     Dim response = responseTask.Result
+                                                                                                                                                     Console.WriteLine(response)
+                                                                                                                                                 Else
+                                                                                                                                                     Console.WriteLine("API request failed: " & responseTask.Exception.Message)
+                                                                                                                                                 End If
+                                                                                                                                             End Sub)
+                                                                      Else
+                                                                          Console.WriteLine("Failed to obtain token: " & tokenTask.Exception.Message)
+                                                                      End If
                                                                   End Sub)
 End Sub
-
