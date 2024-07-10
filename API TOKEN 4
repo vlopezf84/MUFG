@@ -4,6 +4,12 @@ Imports System.Net.Http.Headers
 Imports System.Text
 Imports System.Threading.Tasks
 
+Imports System
+Imports System.Net.Http
+Imports System.Net.Http.Headers
+Imports System.Text
+Imports System.Threading.Tasks
+
 Public Class ApiClient
     Private Shared ReadOnly client As New HttpClient()
 
@@ -13,10 +19,10 @@ Public Class ApiClient
         client.DefaultRequestHeaders.Authorization = New AuthenticationHeaderValue("Bearer", token)
 
         Dim content = New StringContent(bodyContent, Encoding.UTF8, "application/json")
-        client.PostAsync(url, content).ContinueWith(Sub(responseTask)
+        client.PostAsync(url, content).ContinueWith(Sub(responseTask As Task(Of HttpResponseMessage))
                                                         Dim response = responseTask.Result
                                                         If response.IsSuccessStatusCode Then
-                                                            response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask)
+                                                            response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask As Task(Of String))
                                                                                                                   tcs.SetResult(readTask.Result)
                                                                                                               End Sub)
                                                         Else
@@ -27,6 +33,7 @@ Public Class ApiClient
         Return tcs.Task
     End Function
 End Class
+
 
 
 Sub Main()
