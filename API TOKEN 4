@@ -54,3 +54,4 @@ Sub OnApiMethodCalled(responseTask As Task(Of String))
         Console.WriteLine("API request failed: " & responseTask.Exception.Message)
     End If
 End Sub
+
