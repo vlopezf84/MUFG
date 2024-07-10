@@ -12,23 +12,7 @@ Public Class ApiClient
 
         Dim content = New StringContent(credentials, Encoding.UTF8, "application/json")
         client.PostAsync(url, content).ContinueWith(Sub(responseTask)
-                                                        If responseTask.IsFaulted Then
-                                                            tcs.SetException(responseTask.Exception)
-                                                        ElseIf responseTask.IsCanceled Then
-                                                            tcs.SetCanceled()
-                                                        Else
-                                                            Dim response = responseTask.Result
-                                                            If response.IsSuccessStatusCode Then
-                                                                response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask)
-                                                                                                                      tcs.SetResult(readTask.Result)
-                                                                                                                  End Sub)
-                                                            Else
-                                                                response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask)
-                                                                                                                      Dim errorMsg = "API request failed: " & response.ReasonPhrase & " - " & readTask.Result
-                                                                                                                      tcs.SetException(New Exception(errorMsg))
-                                                                                                                  End Sub)
-                                                            End If
-                                                        End If
+                                                        HandleTokenResponse(responseTask, tcs)
                                                     End Sub)
 
         Return tcs.Task
@@ -59,28 +43,47 @@ Public Class ApiClient
         Return tcs.Task
     End Function
 
+    Private Sub HandleTokenResponse(responseTask As Task(Of HttpResponseMessage), tcs As TaskCompletionSource(Of String))
+        If responseTask.IsFaulted Then
+            tcs.SetException(responseTask.Exception)
+        ElseIf responseTask.IsCanceled Then
+            tcs.SetCanceled()
+        Else
+            responseTask.Result.Content.ReadAsStringAsync().ContinueWith(Sub(readTask)
+                                                                             If readTask.IsFaulted Then
+                                                                                 tcs.SetException(readTask.Exception)
+                                                                             ElseIf readTask.IsCanceled Then
+                                                                                 tcs.SetCanceled()
+                                                                             Else
+                                                                                 tcs.SetResult(readTask.Result)
+                                                                             End If
+                                                                         End Sub)
+        End If
+    End Sub
+
     Private Sub HandleResponse(responseTask As Task(Of HttpResponseMessage), tcs As TaskCompletionSource(Of String))
         If responseTask.IsFaulted Then
             tcs.SetException(responseTask.Exception)
         ElseIf responseTask.IsCanceled Then
             tcs.SetCanceled()
         Else
-            Dim response = responseTask.Result
-            If response.IsSuccessStatusCode Then
-                response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask)
-                                                                      tcs.SetResult(readTask.Result)
-                                                                  End Sub)
-            Else
-                response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask)
-                                                                      Dim errorMsg = "API request failed: " & response.ReasonPhrase & " - " & readTask.Result
-                                                                      tcs.SetException(New Exception(errorMsg))
-                                                                  End Sub)
-            End If
+            responseTask.Result.Content.ReadAsStringAsync().ContinueWith(Sub(readTask)
+                                                                             If readTask.IsFaulted Then
+                                                                                 tcs.SetException(readTask.Exception)
+                                                                             ElseIf readTask.IsCanceled Then
+                                                                                 tcs.SetCanceled()
+                                                                             Else
+                                                                                 If responseTask.Result.IsSuccessStatusCode Then
+                                                                                     tcs.SetResult(readTask.Result)
+                                                                                 Else
+                                                                                     Dim errorMsg = "API request failed: " & responseTask.Result.ReasonPhrase & " - " & readTask.Result
+                                                                                     tcs.SetException(New Exception(errorMsg))
+                                                                                 End If
+                                                                             End If
+                                                                         End Sub)
         End If
     End Sub
 End Class
-
-
 
 /*****/
 
