@@ -1,0 +1,81 @@
+Obtener el Token
+
+Imports System
+Imports System.Net.Http
+Imports System.Net.Http.Headers
+Imports System.Text
+Imports System.Threading.Tasks
+Imports Newtonsoft.Json
+
+Public Class ApiClient
+    Private Shared ReadOnly client As New HttpClient()
+    Private token As String
+
+    Public Function GetToken(url As String, username As String, password As String) As Task(Of String)
+        Dim tcs As New TaskCompletionSource(Of String)()
+
+        Dim requestBody = New With {
+            .Username = username,
+            .Password = password
+        }
+
+        Dim content = New StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json")
+        client.PostAsync(url, content).ContinueWith(Sub(responseTask)
+                                                        Dim response = responseTask.Result
+                                                        If response.IsSuccessStatusCode Then
+                                                            response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask)
+                                                                                                                  Dim responseData = readTask.Result
+                                                                                                                  Dim jsonResponse = JsonConvert.DeserializeObject(Of Object)(responseData)
+                                                                                                                  token = jsonResponse.token
+                                                                                                                  tcs.SetResult(token)
+                                                                                                              End Sub)
+                                                        Else
+                                                            tcs.SetException(New Exception("Unable to obtain token"))
+                                                        End If
+                                                    End Sub)
+
+        Return tcs.Task
+    End Function
+End Class
+
+Consumir la API con el Token
+Public Function CallApiMethod(url As String, token As String, bodyContent As String) As Task(Of String)
+    Dim tcs As New TaskCompletionSource(Of String)()
+
+    client.DefaultRequestHeaders.Authorization = New AuthenticationHeaderValue("Bearer", token)
+
+    Dim content = New StringContent(bodyContent, Encoding.UTF8, "application/json")
+    client.PostAsync(url, content).ContinueWith(Sub(responseTask)
+                                                    Dim response = responseTask.Result
+                                                    If response.IsSuccessStatusCode Then
+                                                        response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask)
+                                                                                                              tcs.SetResult(readTask.Result)
+                                                                                                          End Sub)
+                                                    Else
+                                                        tcs.SetException(New Exception("API request failed"))
+                                                    End If
+                                                End Sub)
+
+    Return tcs.Task
+End Function
+
+Uso del Cliente
+Public Sub Main()
+    Dim apiClient = New ApiClient()
+    Dim tokenUrl As String = "https://example.com/api/auth"
+    Dim apiUrl As String = "https://example.com/api/resource"
+    Dim username As String = "your_username"
+    Dim password As String = "your_password"
+
+    ' Obtener el token
+    apiClient.GetToken(tokenUrl, username, password).ContinueWith(Sub(tokenTask)
+                                                                      Dim token = tokenTask.Result
+                                                                      ' Consumir la API usando el token
+                                                                      Dim bodyContent As String = "{""key"": ""value""}"
+                                                                      apiClient.CallApiMethod(apiUrl, token, bodyContent).ContinueWith(Sub(responseTask)
+                                                                                                                                         Dim response = responseTask.Result
+                                                                                                                                         Console.WriteLine(response)
+                                                                                                                                     End Sub)
+                                                                  End Sub)
+End Sub
+
