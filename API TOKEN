@@ -1,0 +1,75 @@
+OBTENER TOKEN
+
+Imports System
+Imports System.Net.Http
+Imports System.Net.Http.Headers
+Imports System.Text
+Imports System.Threading.Tasks
+Imports Newtonsoft.Json
+
+Public Class ApiClient
+    Private Shared ReadOnly client As New HttpClient()
+    Private token As String
+
+    Public Async Function GetToken(url As String, username As String, password As String) As Task(Of String)
+        Dim requestBody = New With {
+            .Username = username,
+            .Password = password
+        }
+
+        Dim content = New StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json")
+        Dim response As HttpResponseMessage = Await client.PostAsync(url, content)
+
+        If response.IsSuccessStatusCode Then
+            Dim responseData As String = Await response.Content.ReadAsStringAsync()
+            Dim jsonResponse = JsonConvert.DeserializeObject(Of Dynamic)(responseData)
+            token = jsonResponse.token
+            Return token
+        Else
+            Throw New Exception("Unable to obtain token")
+        End If
+    End Function
+End Class
+
+CONSUMIR API
+Public Async Function CallApiMethod(url As String, token As String, bodyContent As String) As Task(Of String)
+    client.DefaultRequestHeaders.Authorization = New AuthenticationHeaderValue("Bearer", token)
+
+    Dim content = New StringContent(bodyContent, Encoding.UTF8, "application/json")
+    Dim response As HttpResponseMessage = Await client.PostAsync(url, content)
+
+    If response.IsSuccessStatusCode Then
+        Return Await response.Content.ReadAsStringAsync()
+    Else
+        Throw New Exception("API request failed")
+    End If
+End Function
+
+USO DEL CLIENTE
+Public Async Function Main() As Task
+    Dim apiClient = New ApiClient()
+    Dim tokenUrl As String = "https://example.com/api/auth"
+    Dim apiUrl As String = "https://example.com/api/resource"
+    Dim username As String = "your_username"
+    Dim password As String = "your_password"
+
+    ' Obtener el token
+    Dim token As String = Await apiClient.GetToken(tokenUrl, username, password)
+
+    ' Consumir la API usando el token
+    Dim bodyContent As String = "{""key"": ""value""}"
+    Dim response As String = Await apiClient.CallApiMethod(apiUrl, token, bodyContent)
+
+    Console.WriteLine(response)
+End Function
+
+ALMACENAMIENTO DEL TOKEN
+Private Shared _token As String
+
+Public Shared Function GetToken() As String
+    If String.IsNullOrEmpty(_token) Then
+        _token = GetTokenFromApi()
+    End If
+
+    Return _token
+End Function
