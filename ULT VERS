@@ -1,0 +1,179 @@
+Imports System.Net.Http
+Imports System.Net.Http.Headers
+Imports System.Threading.Tasks
+Imports System.Text
+Imports Newtonsoft.Json
+
+Public Class ApiClient
+    Private Shared ReadOnly client As New HttpClient()
+
+   Public Function GetToken(url As String, credentials As String) As Task(Of String)
+        Dim tcs As New TaskCompletionSource(Of String)()
+
+        Dim content = New StringContent(credentials, Encoding.UTF8, "application/json")
+        client.PostAsync(url, content).ContinueWith(Sub(responseTask As Task(Of HttpResponseMessage))
+                                                        If responseTask.IsFaulted Then
+                                                            tcs.SetException(responseTask.Exception)
+                                                        ElseIf responseTask.IsCanceled Then
+                                                            tcs.SetCanceled()
+                                                        Else
+                                                            Dim response = responseTask.Result
+                                                            If response.IsSuccessStatusCode Then
+                                                                response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask As Task(Of String))
+                                                                                                                      tcs.SetResult(readTask.Result)
+                                                                                                                  End Sub)
+                                                            Else
+                                                                response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask As Task(Of String))
+                                                                                                                      Dim errorMsg = "API request failed: " & response.ReasonPhrase & " - " & readTask.Result
+                                                                                                                      tcs.SetException(New Exception(errorMsg))
+                                                                                                                  End Sub)
+                                                            End If
+                                                        End If
+                                                    End Sub)
+
+        Return tcs.Task
+    End Function
+
+    Public Function CallApiPostMethod(url As String, token As String, bodyContent As String) As Task(Of String)
+        Dim tcs As New TaskCompletionSource(Of String)()
+
+        client.DefaultRequestHeaders.Authorization = New AuthenticationHeaderValue("Bearer", token)
+
+        Dim content = New StringContent(bodyContent, Encoding.UTF8, "application/json")
+        client.PostAsync(url, content).ContinueWith(Sub(responseTask As Task(Of HttpResponseMessage))
+                                                        HandleReponse(responseTask, tcs)
+                                                    End Sub
+                                                    )
+
+        Return tcs.Task
+    End Function
+
+    Public Function CallApiGetMethod(url As String, token As String) As Task(Of String)
+        Dim tcs As New TaskCompletionSource(Of String)()
+
+        client.DefaultRequestHeaders.Authorization = New AuthenticationHeaderValue("Bearer", token)
+
+
+        client.GetAsync(url).ContinueWith(Sub(responseTask As Task(Of HttpResponseMessage))
+                                              HandleReponse(responseTask, tcs)
+                                          End Sub
+                                                    )
+
+        Return tcs.Task
+    End Function
+
+    Public Sub HandleReponse(responseTask As Task(Of HttpResponseMessage), tcs As TaskCompletionSource(Of String))
+        If responseTask.IsFaulted Then
+            tcs.SetException(responseTask.Exception)
+        ElseIf responseTask.IsCanceled Then
+            tcs.SetCanceled()
+        Else
+            Dim response = responseTask.Result
+            If response.IsSuccessStatusCode Then
+                response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask As Task(Of String))
+                                                                      tcs.SetResult(readTask.Result)
+                                                                  End Sub)
+            Else
+                response.Content.ReadAsStringAsync().ContinueWith(Sub(readTask As Task(Of String))
+                                                                      Dim errorMsg = "API request failed: " & response.ReasonPhrase & " - " & readTask.Result
+                                                                      tcs.SetException(New Exception(errorMsg))
+                                                                  End Sub)
+            End If
+        End If
+    End Sub
+
+
+
+End Class
+
+
+
+
+Imports System.Net.Http
+Imports System.Net.Http.Headers
+Imports System.Threading.Tasks
+Imports System.Text
+Imports Newtonsoft.Json
+
+Module Module1
+   Sub Main()
+        'Dim apiClient = New ApiClient()
+        ''Dim apiUrl As String = "http://mxdf01dvl016:13337/api/Test/hello"
+        'Dim apiUrl As String = "http://mxdf01dvl016:13337/api/rejection/mt"
+        'Dim token As String = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9uYW1laWRlbnRpZmllciI6IjEiLCJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9zeXN0ZW0iOiJTd2lmdFJlamVjdGlvbkFwaSIsImh0dHA6Ly9zY2hlbWFzLm1pY3Jvc29mdC5jb20vd3MvMjAwOC8wNi9pZGVudGl0eS9jbGFpbXMvcm9sZSI6IiIsImV4cCI6MTcyMDY1NDI1NiwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdDoxMzMzNyIsImF1ZCI6Imh0dHA6Ly9sb2NhbGhvc3Q6MTMzMzcifQ.gSd4lslL2ngUoK2nWseYMx6LutlvVHc6uIOFwBAXUL0"
+
+        'Dim json = New With
+        '{
+        ' .samhRfk = "ICN:123123123890",
+        ' .senderReference = "FTXD1000000",
+        ' .receivingBank = "CHASUS33",
+        ' .messageType = "MT-103",
+        ' .valueDate = "2024-07-03T08:10:24.051Z",
+        ' .currency = "USD",
+        ' .amount = 77,
+        ' .reason = "PROBLEM"
+        '}
+
+        'Dim bodyContent = JsonConvert.SerializeObject(json)
+
+        '' Consumir la API usando el token
+        'apiClient.CallApiPostMethod(apiUrl, token, bodyContent).ContinueWith(AddressOf OnApiMethodCalled)
+
+        ''apiClient.CallApiGetMethod(apiUrl, token).ContinueWith(AddressOf OnApiMethodCalled)
+        'Console.ReadLine()
+        Console.Write("Inicio")
+        Dim apiClient = New ApiClient()
+        Dim tokenUrl As String = "http://mxdf01dvl016:13337/api/Auth"
+        Dim credentials As String = "{""userLogin"": ""N312168"", ""userPass"": ""password""}"
+        'Dim apiUrl As String = "http://mxdf01dvl016:13337/api/Test/hello"
+        Dim apiUrl As String = "http://mxdf01dvl016:13337/api/rejection/mt"
+        'Dim token As String = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9uYW1laWRlbnRpZmllciI6IjEiLCJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9zeXN0ZW0iOiJTd2lmdFJlamVjdGlvbkFwaSIsImh0dHA6Ly9zY2hlbWFzLm1pY3Jvc29mdC5jb20vd3MvMjAwOC8wNi9pZGVudGl0eS9jbGFpbXMvcm9sZSI6IiIsImV4cCI6MTcyMDY1NDI1NiwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdDoxMzMzNyIsImF1ZCI6Imh0dHA6Ly9sb2NhbGhvc3Q6MTMzMzcifQ.gSd4lslL2ngUoK2nWseYMx6LutlvVHc6uIOFwBAXUL0"
+
+        Dim json = New With
+        {
+         .samhRfk = "ICN:123123123890",
+         .senderReference = "FTXD1000000",
+         .receivingBank = "CHASUS33",
+         .messageType = "MT-103",
+         .valueDate = "2024-07-03T08:10:24.051Z",
+         .currency = "USD",
+         .amount = 77,
+         .reason = "PROBLEM"
+        }
+
+        Dim bodyContent = JsonConvert.SerializeObject(json)
+
+        ' Obtener el token
+        Dim tokenTaskM As Task = apiClient.GetToken(tokenUrl, credentials).ContinueWith(Sub(tokenTask As Task(Of String))
+                                                                                            If tokenTask.IsCompleted AndAlso Not tokenTask.IsFaulted Then
+                                                                                                Dim token = tokenTask.Result
+                                                                                                Console.WriteLine("Token obtenido: " & token)
+
+                                                                                                ' Ejemplo de solicitud POST
+                                                                                                apiClient.CallApiPostMethod(apiUrl, token, bodyContent).ContinueWith(AddressOf OnApiMethodCalled)
+
+                                                                                                ' Ejemplo de solicitud GET
+                                                                                                'apiClient.CallApiGetMethod(apiUrl, token).ContinueWith(AddressOf OnApiMethodCalled)
+                                                                                            ElseIf tokenTask.IsFaulted Then
+                                                                                                Console.WriteLine("Error al obtener el token: " & tokenTask.Exception.InnerException.Message)
+                                                                                            End If
+                                                                                        End Sub)
+        tokenTaskM.Wait()
+        Console.Write("Termino")
+
+        Console.ReadLine()
+    End Sub
+
+    Sub OnApiMethodCalled(responseTask As Task(Of String))
+        If responseTask.IsCompleted AndAlso Not responseTask.IsFaulted Then
+            Dim response = responseTask.Result
+            Console.WriteLine(response)
+
+        ElseIf responseTask.IsFaulted Then
+
+            Console.WriteLine("API request failed: " & responseTask.Exception.InnerException.Message)
+        Else
+            Console.WriteLine("API request was canceled")
+        End If
+    End Sub
+End Module
