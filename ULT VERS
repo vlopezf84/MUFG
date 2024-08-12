@@ -227,3 +227,56 @@ Sub Main()
     Console.WriteLine("Termino")
     Console.ReadLine()
 End Sub
+
+****
+
+
+Sub Main()
+    Console.Write("Inicio")
+    
+    Dim apiClient = New ApiClient()
+    Dim tokenUrl As String = "http://mxdf01dvl016:13337/api/Auth"
+    Dim credentials As String = "{""userLogin"": ""N312168"", ""userPass"": ""password""}"
+    Dim apiUrl As String = "http://mxdf01dvl016:13337/api/rejection/mt"
+
+    Dim json = New With
+    {
+        .samhRfk = "ICN:123123123890",
+        .senderReference = "FTXD1000000",
+        .receivingBank = "CHASUS33",
+        .messageType = "MT-103",
+        .valueDate = "2024-07-03T08:10:24.051Z",
+        .currency = "USD",
+        .amount = 77,
+        .reason = "PROBLEM"
+    }
+
+    Dim bodyContent = JsonConvert.SerializeObject(json)
+
+    Try
+        ' Obtener el token sincrónicamente
+        Dim tokenTask As Task(Of String) = apiClient.GetToken(tokenUrl, credentials)
+        tokenTask.Wait() ' Espera a que la tarea se complete
+        Dim token As String = tokenTask.Result
+
+        If Not String.IsNullOrEmpty(token) Then
+            Console.WriteLine("Token obtenido: " & token)
+            
+            ' Hacer la solicitud POST sincrónicamente
+            Dim postTask As Task(Of String) = apiClient.CallApiPostMethod(apiUrl, token, bodyContent)
+            postTask.Wait() ' Espera a que la tarea se complete
+            Dim postResponse As String = postTask.Result
+            
+            ' Manejar la respuesta directamente
+            OnApiMethodCalled(postTask)
+        Else
+            Console.WriteLine("No se pudo obtener el token.")
+        End If
+
+    Catch ex As AggregateException
+        Console.WriteLine("Error durante la operación: " & ex.Flatten().InnerException.Message)
+    End Try
+
+    Console.WriteLine("Termino")
+    Console.ReadLine()
+End Sub
