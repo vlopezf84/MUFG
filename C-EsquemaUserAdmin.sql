@@ -1,0 +1,75 @@
+CREATE TABLE Usuarios (
+    IdUsuario INT IDENTITY PRIMARY KEY,
+    Nombre NVARCHAR(100) NOT NULL,
+    Correo NVARCHAR(255) UNIQUE NOT NULL,
+    ContrasenaHash VARBINARY(64) NOT NULL,
+    Activo BIT NOT NULL DEFAULT 1,
+    CuentaExpira BIT NOT NULL DEFAULT 0,
+    FechaExpiracion DATETIME NULL,
+    IntentosFallidos INT NOT NULL DEFAULT 0,
+    Bloqueado BIT NOT NULL DEFAULT 0,
+    FechaCreacion DATETIME DEFAULT GETDATE(),
+    UltimaConexion DATETIME NULL
+);
+GO
+
+CREATE TABLE Roles (
+    IdRol INT IDENTITY PRIMARY KEY,
+    Nombre NVARCHAR(100) UNIQUE NOT NULL,
+    Descripcion NVARCHAR(255) NULL
+);
+GO 
+
+CREATE TABLE UsuarioRoles (
+    IdUsuario INT NOT NULL,
+    IdRol INT NOT NULL,
+    PRIMARY KEY (IdUsuario, IdRol),
+    FOREIGN KEY (IdUsuario) REFERENCES Usuarios(IdUsuario) ON DELETE CASCADE,
+    FOREIGN KEY (IdRol) REFERENCES Roles(IdRol) ON DELETE CASCADE
+);
+GO 
+
+CREATE TABLE Perfiles (
+    IdPerfil INT IDENTITY PRIMARY KEY,
+    IdUsuario INT UNIQUE NOT NULL,
+    Preferencias NVARCHAR(MAX) NULL, -- Puede ser JSON
+    FOREIGN KEY (IdUsuario) REFERENCES Usuarios(IdUsuario) ON DELETE CASCADE
+);
+GO 
+
+CREATE TABLE Pantallas (
+    IdPantalla INT IDENTITY PRIMARY KEY,
+    Nombre NVARCHAR(100) UNIQUE NOT NULL,
+    Descripcion NVARCHAR(255) NULL
+);
+GO 
+
+CREATE TABLE Permisos (
+    IdPermiso INT IDENTITY PRIMARY KEY,
+    IdPantalla INT NOT NULL,
+    Nombre NVARCHAR(100) NOT NULL,
+    Consultar BIT NOT NULL DEFAULT 0,
+    Insertar BIT NOT NULL DEFAULT 0,
+    Actualizar BIT NOT NULL DEFAULT 0,
+    Eliminar BIT NOT NULL DEFAULT 0,
+    FOREIGN KEY (IdPantalla) REFERENCES Pantallas(IdPantalla) ON DELETE CASCADE
+);
+GO 
+
+CREATE TABLE RolPermisos (
+    IdRol INT NOT NULL,
+    IdPermiso INT NOT NULL,
+    PRIMARY KEY (IdRol, IdPermiso),
+    FOREIGN KEY (IdRol) REFERENCES Roles(IdRol) ON DELETE CASCADE,
+    FOREIGN KEY (IdPermiso) REFERENCES Permisos(IdPermiso) ON DELETE CASCADE
+);
+GO 
+
+CREATE TABLE HistorialAccesos (
+    IdAcceso INT IDENTITY PRIMARY KEY,
+    IdUsuario INT NOT NULL,
+    FechaAcceso DATETIME DEFAULT GETDATE(),
+    IP NVARCHAR(45) NULL,
+    FOREIGN KEY (IdUsuario) REFERENCES Usuarios(IdUsuario) ON DELETE CASCADE
+);
+GO 
