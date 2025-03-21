@@ -1,1 +1,834 @@
+Imports System.Xml.Linq
+Imports System.Linq
+Imports BTMUM_T24
+Imports DidiSoft.Pgp
+Imports WinSCP
+Imports System.IO
+
+
+Module Definiciones
+    '=====================================================================================================================================================================================
+    'Definición de Variables
+    '=====================================================================================================================================================================================
+    Public Const gsNombre_Servicio As String = "GPH_Descarga"
+    Public Const gsTipoOperacion As String = "GPH"
+    Public Const gbCierraBases As Boolean = True
+    Public goTOMI_Database As MSSQL_Database
+    Public goT24_VW_Database As MSSQL_Database
+    Public goT24_Connection As T24_MW_Connection
+    Public goINSIGHT_Database As MSSQL_Database
+    Public gbBases_Inicializadas As Boolean
+    Public gbEjecutando_Procedimientos As Boolean
+    Public giPID As Integer
+    Public gsProcessName As String
+    Public gsDisplayName As String
+
+    '' Datos locales solo usados en este modulo
+    Public gsFechaSistema As String = ""
+    Private gsHoraGPH_Inicio As String = ""
+    Private gsHoraGPH_Fin As String = ""
+    Private gbEnHorarioGPH As Boolean = False
+    Private gbEsDiaHabil As Boolean = False
+
+    Public gsCmdDescargaGPH As String
+    Public gsCmdTransmiteGPH As String
+    Public gsRutaFilesDescarga As String
+    Public gsRutaFilesDescargaBackUp As String
+    Public gsRutaFilesRemote As String
+    Public gsRemoteHostNameSFTP As String
+    Public gsRemoteUsrSFTP As String
+    Public gsRemotePasswordSFTP As String
+    Public gsSshHostKeySFTP As String
+    Public gsSshPrivateKeyPathSFTP As String
+    Public gsSshPortNumberHostSFTP As String
+    Public gsRutaFilesTransmite As String
+    Public gsRutaFilesXML As String
+    Public gsRutaKeys As String
+
+    Public gsLlavePublica As String
+    Public gsLlavePrivada As String
+    Public gsClaveLlavesPGP As String
+
+
+    Public gsFechaSistema_T24_Juliana As String
+
+
+    ''''' INICIO DEL CONTROL DE EXCEPCION POR CORREO '''''
+
+    Structure ControlErrorEstructura
+        Dim lbConErrorPrevio As Boolean
+        Dim ldFechaInicio As Object     ' Date pero no permite Nothing en un objecto Date
+        Dim ldFechaMail As Object       ' Date pero no permite Nothing en un objecto Date
+        Dim lsMensaje As String
+        Dim loExcepcion As Exception
+    End Structure
+    Private loControlError(3) As ControlErrorEstructura         ' 4 bases: 0=General, 1=MS-SQL, 2=mySQL, 3=Oracle
+
+    Public Sub RealizaControlError(ByVal index As Integer, ByVal e As Exception)
+        Const liMinutosPrimero As Integer = 10
+        Const liMinutosRepetir As Integer = 5
+        Dim lbEnviaCorreo As Boolean
+
+        lbEnviaCorreo = False
+        If loControlError(index).lbConErrorPrevio Then
+            ' Valido si es el mismo error
+            If loControlError(index).lsMensaje = e.Message Then
+                ' Mismo error!
+                If DateAdd(DateInterval.Minute, liMinutosPrimero, loControlError(index).ldFechaInicio) <= Now Then
+                    ' 10 minutos o más con el mismo error!
+                    If IsNothing(loControlError(index).ldFechaMail) Then
+                        write_Log("INFO|ControlError|Primer mail de error, index=" & index)
+                        ' No se ha enviado correo, ENVIO CORREO
+                        lbEnviaCorreo = True
+                    Else
+                        ' Valido la ultima vez que envie el error
+                        If DateAdd(DateInterval.Minute, liMinutosRepetir, loControlError(index).ldFechaMail) <= Now Then
+                            write_Log("INFO|ControlError|Error recursivo, index=" & index)
+                            ' Nuevamente ENVIO CORREO (pasaron 5 minutos desde el último correo)
+                            lbEnviaCorreo = True
+                        End If
+                    End If
+                End If
+            Else
+                ' Nuevo error (no envio correo y marco como nuevo error)
+                loControlError(index).ldFechaInicio = Now
+                loControlError(index).ldFechaMail = Nothing
+                loControlError(index).lsMensaje = e.Message
+                loControlError(index).loExcepcion = e
+            End If
+        Else
+            write_Log("INFO|ControlError|Es inicio de control de error, index=" & index)
+
+            ' Es la primera vez que tengo el error
+            loControlError(index).lbConErrorPrevio = True
+            loControlError(index).ldFechaInicio = Now
+            loControlError(index).lsMensaje = e.Message
+            loControlError(index).ldFechaMail = Nothing
+            loControlError(index).loExcepcion = e
+        End If
+
+        If lbEnviaCorreo Then
+            write_Log("INFO|ControlError|Tratando de enviar correo de error, index=" & index)
+
+            ' Rutina de envio de correo
+            Try
+                Dim lsMail_to As String, lsMail_cc As String, lsMensaje As String
+
+                ' Destinatarios
+                lsMail_to = "jcedeno@mx.mufg.jp,jesparza@mx.mufg.jp,iperez@mx.mufg.jp,gmendez@mx.mufg.jp,rmartinez@mx.mufg.jp"
+                lsMail_cc = ""
+
+                lsMensaje = "Error en servicio de GPH_Descarga: " & loControlError(index).lsMensaje
+
+                ' Envio del mail
+                Envia_Email(New String() {"avisos_servicios@mx.mufg.jp", "Notificador Servicios"}, lsMail_to, lsMail_cc, Nothing, "Error en Servicio de GPH_Descarga", lsMensaje)
+                write_Log("INFO|ControlError|Correo enviado, index=" & index)
+
+                ' Actualizo como correo enviado
+                loControlError(index).ldFechaMail = Now
+            Catch exMail As Exception
+                write_Log("INFO|ControlError|Error|Ocurre exception: " & exMail.Message)
+            End Try
+        End If
+    End Sub
+
+    Public Sub LimpiaControlError(ByVal index As Integer)
+        If loControlError(index).lbConErrorPrevio Then
+            write_Log("INFO|ControlError|Limpio error, index=" & index)
+        End If
+        loControlError(index).lbConErrorPrevio = False
+        loControlError(index).ldFechaInicio = Nothing
+        loControlError(index).ldFechaMail = Nothing
+        loControlError(index).lsMensaje = Nothing
+        loControlError(index).loExcepcion = Nothing
+    End Sub
+
+    ''''' FIN DEL CONTROL DE ERROR
+
+    '=====================================================================================================================================================================================
+    ' Pasa a memoria todos los datos de parametros sistema
+    '=====================================================================================================================================================================================
+    Private Sub obtenerParametrosSistema()
+        Dim lrsDatos As DbDataReader
+        Dim lsDatoANT As String
+
+        ' Fecha de Tomi
+        lrsDatos = goTOMI_Database.Execute_Query("SELECT fecha FROM tb_srv_fecha_sistema WHERE cerrado=0 AND nextday=1 AND openday=1")
+        If Not IsNothing(lrsDatos) Then
+            lsDatoANT = gsFechaSistema
+            Do While lrsDatos.Read
+                gsFechaSistema = Format(lrsDatos.Item("fecha"), "yyyyMMdd")
+                If lsDatoANT <> gsFechaSistema Then
+                    write_Log("INFO|obtenerParametrosSistema|Fecha del sistema '" & gsFechaSistema & "'.")
+                    ' Cambio la fecha del sistema y la fecha anterior era valida?
+                    If lsDatoANT <> "" Then
+                        write_Log("INFO|obtenerParametrosSistema|Forzamos el inicio del servicio por cambio en la fecha del sistema.")
+                        ' Forzamos la finalización del servicio
+                        End
+                    End If
+                End If
+            Loop
+            lrsDatos.Close()
+            lrsDatos = Nothing
+        End If
+
+        ' Fecha de T24
+        lrsDatos = goT24_VW_Database.Execute_Query("SELECT TODAY FROM VW_T24_DATES WHERE DATES_ID = 'MX0010001'")
+        If Not IsNothing(lrsDatos) Then
+            lsDatoANT = gsFechaSistema_T24_Juliana
+            Do While lrsDatos.Read
+                gsFechaSistema_T24_Juliana = lrsDatos.Item("TODAY").ToString
+                If lsDatoANT <> gsFechaSistema_T24_Juliana Then
+                    write_Log("INFO|obtenerParametrosSistema|Fecha Juliana de T24 '" & gsFechaSistema_T24_Juliana & "'.")
+                End If
+            Loop
+            lrsDatos.Close()
+            lrsDatos = Nothing
+        End If
+
+        ' Puede iniciar el servicio (debe limitarse a no iniciar sábado, domingo o días festivos, pero para casos especiales se puede forzar su inicio)
+        gbEsDiaHabil = puedoIniciarServicio(goTOMI_Database)
+
+        ''Dia hábil o es día feriado, sábado o domingo
+        'gbEsDiaHabil = True
+        'If Now.DayOfWeek = DayOfWeek.Saturday And Not BTMUM_64.esLaboralSabado Then
+        '    gbEsDiaHabil = False
+        'ElseIf Now.DayOfWeek = DayOfWeek.Sunday And Not BTMUM_64.esLaboralDomingo Then
+        '    gbEsDiaHabil = False
+        'Else
+        '    lrsDatos = goTOMI_Database.Execute_Query("SELECT COUNT(1) AS num_regs FROM tb_srv_diasnohabiles WHERE dianohabil=" & fechaSQL(Now) & " AND tipoccy IN ('MXN','MXP')")
+        '    If Not IsNothing(lrsDatos) Then
+        '        Do While lrsDatos.Read
+        '            If (lrsDatos.Item("num_regs") > 0) And Not BTMUM_64.esLaboralFestivo Then
+        '                ' Dia inhabil
+        '                gbEsDiaHabil = False
+        '            End If
+        '        Loop
+        '        lrsDatos.Close()
+        '        lrsDatos = Nothing
+        '    End If
+        'End If
+
+        ' Horarios de inicio y fin de GPH_Descarga (inicia con la lectura, termina con la operacion)
+        lrsDatos = goTOMI_Database.Execute_Query("SELECT id_parametro,valor FROM tb_srv_parametros_sistema WHERE id_parametro IN ('HORA_GPH_INICIO','HORA_GPH_FIN','RUTA_GPH_DESCARGA','RUTA_GPH_TRANSMITE','RUTA_ARCHIVOS_GPH_DESCARGA','RUTA_ARCHIVOS_GPH_TRANSMITE','RUTA_LLAVES_GPH','RUTA_ARCHIVOS_GPH_XML','REMOTE_PATH_SFTP_GPH_DOWNLOAD','REMOTE_HOST_NAME_GPH','USER_SFTP_GPH','PASSWORD_SFTP_GPH','SSH_HOST_KEY_GPH','SSH_PRIVATE_KEY_PATH_GPH','SSH_HOST_PORT_NUMBER_GPH','RUTA_ARCHIVOS_GPH_DESCARGA_BACKUP')")
+        If Not IsNothing(lrsDatos) Then
+            lsDatoANT = gsFechaSistema
+            Do While lrsDatos.Read
+                Select Case lrsDatos.Item("id_parametro")
+                    Case "HORA_GPH_INICIO"
+                        lsDatoANT = gsHoraGPH_Inicio
+                        gsHoraGPH_Inicio = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsHoraGPH_Inicio Then
+                            write_Log("INFO|obtenerParametrosSistema|Hora de inicio de servicio GPH_Descarga'" & gsHoraGPH_Inicio & "'.")
+                        End If
+                    Case "HORA_GPH_FIN"
+                        lsDatoANT = gsHoraGPH_Fin
+                        gsHoraGPH_Fin = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsHoraGPH_Fin Then
+                            write_Log("INFO|obtenerParametrosSistema|Hora de finalización de servicio GPH_Descarga '" & gsHoraGPH_Fin & "'.")
+                        End If
+                    Case "RUTA_GPH_DESCARGA"
+                        lsDatoANT = gsCmdDescargaGPH
+                        gsCmdDescargaGPH = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsCmdDescargaGPH Then
+                            write_Log("INFO|obtenerParametrosSistema|Archivo de Descarga GPH '" & gsCmdDescargaGPH & "'.")
+                        End If
+                    Case "RUTA_GPH_TRANSMITE"
+                        lsDatoANT = gsCmdTransmiteGPH
+                        gsCmdTransmiteGPH = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsCmdTransmiteGPH Then
+                            write_Log("INFO|obtenerParametrosSistema|Archivo de Transmision GPH '" & gsCmdTransmiteGPH & "'.")
+                        End If
+                    Case "RUTA_ARCHIVOS_GPH_DESCARGA"
+                        lsDatoANT = gsRutaFilesDescarga
+                        gsRutaFilesDescarga = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsRutaFilesDescarga Then
+                            write_Log("INFO|obtenerParametrosSistema|Ruta de Archivos Descargados GPH '" & gsRutaFilesDescarga & "'.")
+                        End If
+                    Case "RUTA_ARCHIVOS_GPH_TRANSMITE"
+                        lsDatoANT = gsRutaFilesTransmite
+                        gsRutaFilesTransmite = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsRutaFilesTransmite Then
+                            write_Log("INFO|obtenerParametrosSistema|Ruta de Archivos Transmitidos GPH '" & gsRutaFilesTransmite & "'.")
+                        End If
+                    Case "RUTA_LLAVES_GPH"
+                        lsDatoANT = gsRutaKeys
+                        gsRutaKeys = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsRutaKeys Then
+                            write_Log("INFO|obtenerParametrosSistema|Ruta de Llaves Publicas y Privadas de GPH '" & gsRutaKeys & "'.")
+                        End If
+                    Case "RUTA_ARCHIVOS_GPH_XML"
+                        lsDatoANT = gsRutaFilesXML
+                        gsRutaFilesXML = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsRutaFilesXML Then
+                            write_Log("INFO|obtenerParametrosSistema|Ruta de Archivos Desencriptados GPH '" & gsRutaFilesXML & "'.")
+                        End If
+                    Case "REMOTE_PATH_SFTP_GPH_DOWNLOAD"
+                        lsDatoANT = gsRutaFilesRemote
+                        gsRutaFilesRemote = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsRutaFilesRemote Then
+                            write_Log("INFO|obtenerParametrosSistema|Ruta de Archivos Remoto GPH '" & gsRutaFilesRemote & "'.")
+                        End If
+                    Case "REMOTE_HOST_NAME_GPH"
+                        lsDatoANT = gsRemoteHostNameSFTP
+                        gsRemoteHostNameSFTP = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsRemoteHostNameSFTP Then
+                            write_Log("INFO|obtenerParametrosSistema|Nombre del servidor remoto SFTP-GPH: '" & gsRemoteHostNameSFTP & "'.")
+                        End If
+                    Case "USER_SFTP_GPH"
+                        lsDatoANT = gsRemoteUsrSFTP
+                        gsRemoteUsrSFTP = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsRemoteUsrSFTP Then
+                            write_Log("INFO|obtenerParametrosSistema|Usuario servidor remoto SFTP-GPH: '" & gsRemoteUsrSFTP & "'.")
+                        End If
+                    Case "PASSWORD_SFTP_GPH"
+                        lsDatoANT = gsRemotePasswordSFTP
+                        gsRemotePasswordSFTP = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsRemotePasswordSFTP Then
+                            write_Log("INFO|obtenerParametrosSistema|Password servidor remoto SFTP-GPH: ********.")
+                        End If
+                    Case "SSH_HOST_KEY_GPH"
+                        lsDatoANT = gsSshHostKeySFTP
+                        gsSshHostKeySFTP = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsSshHostKeySFTP Then
+                            write_Log("INFO|obtenerParametrosSistema|Cadena SSH del Host SFTP: '" & gsSshHostKeySFTP & "'.")
+                        End If
+                    Case "SSH_PRIVATE_KEY_PATH_GPH"
+                        lsDatoANT = gsSshPrivateKeyPathSFTP
+                        gsSshPrivateKeyPathSFTP = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsSshPrivateKeyPathSFTP Then
+                            write_Log("INFO|obtenerParametrosSistema|Ruta del certificado SSH del Host SFTP: '" & gsSshPrivateKeyPathSFTP & "'.")
+                        End If
+                    Case "SSH_HOST_PORT_NUMBER_GPH"
+                        lsDatoANT = gsSshPortNumberHostSFTP
+                        gsSshPortNumberHostSFTP = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsSshPortNumberHostSFTP Then
+                            write_Log("INFO|obtenerParametrosSistema|Puerto SSH del Host SFTP: '" & gsSshPortNumberHostSFTP & "'.")
+                        End If
+                    Case "RUTA_ARCHIVOS_GPH_DESCARGA_BACKUP"
+                        lsDatoANT = gsRutaFilesDescargaBackUp
+                        gsRutaFilesDescargaBackUp = lrsDatos.Item("valor")
+                        If lsDatoANT <> gsRutaFilesDescargaBackUp Then
+                            write_Log("INFO|obtenerParametrosSistema|Ruta de BackUp Archivos Descargados GPH '" & gsRutaFilesDescargaBackUp & "'.")
+                        End If
+                End Select
+            Loop
+            lrsDatos.Close()
+            lrsDatos = Nothing
+        End If
+        ' Validación de hora de inicio/fin de operaciones
+        If gsHoraGPH_Inicio = "" Then
+            Throw New Exception("No se especifica la hora de inicio de GPH_Descarga")
+        End If
+        If gsHoraGPH_Fin = "" Then
+            Throw New Exception("No se especifica la hora de finalización de GPH_Descarga")
+        End If
+    End Sub
+
+    '=====================================================================================================================================================================================
+    ' Procedimiento Principal para el procesamiento de las operaciones
+    '=====================================================================================================================================================================================
+    Public Sub Ejecuta_Procedimientos()
+        Try
+            Dim lsHoraSistema As String
+
+            Actualiza_Ejecucion(goTOMI_Database, gsNombre_Servicio, giPID, gsProcessName)
+
+            '' Obtiene los parametros del sistema (variables, rutas, fechas, etc)
+            obtenerParametrosSistema()
+
+            ' Para validar si está en horario de operación o no
+            lsHoraSistema = Now.ToString("HH:mm")
+
+            write_Log("INFO|Ejecuta_Procedimientos|HoraSistema='" & lsHoraSistema & "'.")
+
+            If lsHoraSistema >= gsHoraGPH_Inicio And lsHoraSistema <= gsHoraGPH_Fin Then
+                ' Bandera para saber si estoy en horario de lectura o no
+                If Not gbEnHorarioGPH Then
+                    gbEnHorarioGPH = True
+                    write_Log("INFO|Ejecuta_Procedimientos|Inicio horario de GPH, HoraSistema='" & lsHoraSistema & "'.")
+                End If
+            Else
+                ''' FUERA DE HORARIO
+                If gbEnHorarioGPH Then
+                    gbEnHorarioGPH = False
+                    write_Log("INFO|Ejecuta_Procedimientos|Termina horario de GPH, HoraSistema='" & lsHoraSistema & "'")
+                End If
+            End If
+
+            ''' Valido el tipo de operación - horario
+            If Not gbEnHorarioGPH Then
+                write_Log("ERROR|Ejecuta_Procedimientos|El servicio está fuera de horario.")
+                inserta_alerta(Nothing, Nothing, gsNombre_Servicio, "ERROR", "El servicio está fuera de horario", giPID, gsProcessName, New Exception("El servicio '" & gsNombre_Servicio & "' está fuera de horario."), goTOMI_Database)
+                Return
+            End If
+
+            ' Valido que sea día hábil
+            If gbEsDiaHabil Then
+                ' Imprime opereraciones
+                realiza_operaciones()
+            Else
+                write_Log("ERROR|Ejecuta_Procedimientos|Hoy es un día inhábil.")
+            End If
+
+            '' Fin de los procesos a realizar
+            Actualiza_Terminacion(goTOMI_Database, gsNombre_Servicio, giPID, gsProcessName)
+        Catch lexEjecutaProcedimiento As Exception
+            write_Log("ERROR|Ejecuta_Procedimientos|Se presenta exception: " & lexEjecutaProcedimiento.ToString)
+            ' Inserto la alarma
+            inserta_alerta(Nothing, Nothing, gsNombre_Servicio, "CRITICO", "Error en ejecuta_procedimientos", giPID, gsProcessName, lexEjecutaProcedimiento, goTOMI_Database)
+            ' Control de errores
+            RealizaControlError(0, lexEjecutaProcedimiento)
+        End Try
+        '=====================================================================================================================================================================================
+    End Sub
+
+    '=====================================================================================================================================================================================
+    ' Para la realizacion de las operaciones
+    '=====================================================================================================================================================================================
+    Private Sub realiza_operaciones()
+        Dim lsHoraSistema As String
+
+        ''''''' PROCESO ACTUAL
+        write_Log("INFO|realiza_operaciones|***** Nuevo ciclo de GPH *****")
+        lsHoraSistema = Now.ToString("HH:mm")
+
+        'Descarga de Archivos GPH por FTP
+        'DescargarArchivos()
+        DownloadFiles()
+
+        'Desencripta los Archivos Descargados.
+        DesencriptarArchivos()
+
+        write_Log("INFO|realiza_operaciones|Fin de ciclo de descarga GPH")
+    End Sub
+
+    Private Sub DescargarArchivos()
+        Dim laListaArchivos As Collection
+        Dim lsSQL As String
+        Dim lrsDatos As DbDataReader
+        Dim intArchivos As Integer = 0
+        Dim lsFolio As Long = 0
+
+        Dim strAliasProceso As String = "DESCARGA_ARCHIVO_ENTRADA"
+
+        Try
+            laListaArchivos = New Collection()
+
+            write_Log("INFO|DescargarArchivos|Obteniendo lista de archivos general.")
+            lsSQL = "SELECT (nombre_archivo + ISNULL(extension,'')) AS nombre FROM TB_SRV_GPH_PLAN_TRABAJO_MAESTRO" ' " WHERE fecha_inicio >= '" & gsFechaSistema.ToString.Substring(0, 4) & "-" & gsFechaSistema.ToString.Substring(4, 2) & "-" & gsFechaSistema.ToString.Substring(6, 2) & "'"
+
+            lrsDatos = goTOMI_Database.Execute_Query(lsSQL)
+            If Not IsNothing(lrsDatos) Then
+                While lrsDatos.Read
+                    laListaArchivos.Add(lrsDatos.Item(0), lrsDatos.Item(0))
+                End While
+                lrsDatos.Close()
+                lrsDatos = Nothing
+            End If
+           
+            Dim loCmd As System.Diagnostics.Process
+            Dim lsSalidaEnvio As String, liRegreso As Integer
+            Dim liArchivosOK As Integer, liArchivosErr As Integer
+
+            loCmd = New System.Diagnostics.Process
+            loCmd.EnableRaisingEvents = True
+            loCmd.StartInfo.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
+            loCmd.StartInfo.CreateNoWindow = True
+            loCmd.StartInfo.RedirectStandardOutput = True
+            loCmd.StartInfo.RedirectStandardInput = False
+            loCmd.StartInfo.UseShellExecute = False
+            loCmd.StartInfo.FileName = gsCmdDescargaGPH
+            loCmd.Start()
+            lsSalidaEnvio = loCmd.StandardOutput.ReadToEnd()
+            write_Log("INFO|DescargarArchivos|Ejecutando proceso '" & gsCmdDescargaGPH & "'.")
+            loCmd.WaitForExit()
+            liRegreso = loCmd.ExitCode()
+            loCmd.Close()
+
+            write_Log("INFO|DescargarArchivos|* * * * * *  Descarga de Archivos GPH por SFTP Completa   * * * * * * * * * * *")
+            write_Log("INFO|DescargarArchivos|=========================================================================")
+            write_Log("INFO|DescargarArchivos|Regreso del proceso:" & liRegreso & ", Salida del cmd:" & vbCrLf & lsSalidaEnvio)
+
+            ' Valida la salida
+            liArchivosOK = 0
+            liArchivosErr = 0
+            write_Log("INFO|DescargarArchivos|***** Iniciando validación de salida.")
+
+            Try
+                Dim Folder As New System.IO.DirectoryInfo(gsRutaFilesDescarga)
+                For Each file As System.IO.FileInfo In Folder.GetFiles()
+                    Dim Extension As String = System.IO.Path.GetExtension(gsRutaFilesDescarga & file.Name)
+                    Dim strEstatus As String = ""
+                    lsSQL = ""
+
+                    If Not laListaArchivos.Contains(file.Name) Then
+                        write_Log("INFO|DescargarArchivos|Insertando registro de Archivo: '" & file.Name & "'.")
+
+                        lsSQL = "SELECT ISNULL(MAX(folio),0) as Folio FROM TB_SRV_GPH_PLAN_TRABAJO_MAESTRO WHERE tipo_operacion = " & textoSQL(gsTipoOperacion)
+                        lrsDatos = goTOMI_Database.Execute_Query(lsSQL)
+                        If Not IsNothing(lrsDatos) Then
+                            If lrsDatos.Read Then
+                                lsFolio = lrsDatos.Item("Folio")
+                            End If
+                            lrsDatos.Close()
+                            lrsDatos = Nothing
+                        End If
+
+                        lsFolio += 1
+
+
+                        strEstatus = "DESCARGADO"
+
+
+                        lsSQL = "BEGIN " & vbCrLf
+                        lsSQL += "INSERT INTO TB_SRV_GPH_PLAN_TRABAJO_MAESTRO (folio,tipo_operacion,ruta,nombre_archivo,extension,estatus,fecha_inicio,flg_cierre,flg_terminado,flg_con_error) VALUES (" & _
+                                                                           lsFolio & "," & textoSQL(gsTipoOperacion) & "," & textoSQL(gsRutaFilesDescarga) & "," & textoSQL(Replace(file.Name, Extension, "")) & "," & _
+                                                                           textoSQL(Extension) & "," & textoSQL(strEstatus) & ",GETDATE(),0,0,0);" & vbCrLf
+
+                        lsSQL += "INSERT INTO TB_SRV_GPH_PLAN_TRABAJO_DETALLE " & vbCrLf
+                        lsSQL += "SELECT " & lsFolio & ", tipo_operacion, alias_proceso, orden_ejecucion, descripcion, GETDATE(), NULL, 0, 0 FROM TB_SRV_GPH_PLAN_TRABAJO_CATALOGO ;" & vbCrLf
+
+                        If strEstatus = "DESCARGADO" Then
+                            lsSQL += "UPDATE TB_SRV_GPH_PLAN_TRABAJO_DETALLE SET flg_terminado = 1, flg_con_error = 0, fecha_fin = GETDATE() WHERE folio = " & lsFolio & " AND alias_proceso = " & textoSQL(strAliasProceso)
+                        Else
+                            lsSQL += "UPDATE TB_SRV_GPH_PLAN_TRABAJO_DETALLE SET flg_terminado = 1, flg_con_error = 0, fecha_fin = GETDATE() WHERE folio = " & lsFolio & " AND alias_proceso = " & textoSQL(strAliasProceso) & ";" & vbCrLf
+                            lsSQL += "UPDATE TB_SRV_GPH_PLAN_TRABAJO_MAESTRO SET flg_terminado = 1, flg_con_error = 0, fecha_fin = GETDATE(), err_descripcion = 'El archivo descargado no es un archivo PGP' WHERE folio = " & lsFolio & ";"
+                        End If
+
+                        lsSQL += vbCrLf & "END;"
+
+                        goTOMI_Database.Execute_Command(lsSQL.ToString)
+
+                        intArchivos += 1
+                    End If
+                Next
+
+                write_Log("INFO|DescargarArchivos|Se termina la descarga de " & intArchivos & " archivos GPH.")
+
+            Catch lexValArchivo As Exception
+                write_Log("INFO|DescargarArchivos|Error en la descarga de los archivos GPH. -" & lexValArchivo.ToString & " lsSQL=" & lsSQL)
+            End Try
+
+        Catch lexTarea As Exception
+            write_Log("ERROR|DescargarArchivos|Se presenta exception: " & lexTarea.ToString)
+        End Try
+    End Sub
+
+    Private Sub DesencriptarArchivos()
+        Dim laListaArchivos As Collection
+        Dim lsSQL As String
+        Dim lrsDatos As DbDataReader
+
+        Dim strAliasProceso As String = "DESENCRIPTA_ARCHIVO_ENTRADA"
+
+        Dim strEx As String = ""
+        Try
+            laListaArchivos = New Collection()
+
+            write_Log("INFO|DesencriptarArchivos|Obteniendo lista de archivos pgp descargados y pendientes de desencriptar.")
+            lsSQL = "SELECT A.* FROM TB_SRV_GPH_PLAN_TRABAJO_MAESTRO A INNER JOIN TB_SRV_GPH_PLAN_TRABAJO_DETALLE B ON A.folio = B.folio AND A.tipo_operacion = B.tipo_operacion "
+            lsSQL += "WHERE A.flg_terminado = 0 AND B.flg_terminado = 0 and B.alias_proceso = " & textoSQL(strAliasProceso) & " AND A.fecha_inicio >= '" & gsFechaSistema.ToString.Substring(0, 4) & "-" & gsFechaSistema.ToString.Substring(4, 2) & "-" & gsFechaSistema.ToString.Substring(6, 2) & "' "
+            lsSQL += "AND A.estatus = 'DESCARGADO'"
+
+            lrsDatos = goTOMI_Database.Execute_Query(lsSQL)
+            If Not IsNothing(lrsDatos) Then
+                While lrsDatos.Read
+                    laListaArchivos.Add(New ArchivosGPH With {.Folio = lrsDatos("folio"), .Nombre = lrsDatos("nombre_archivo"), .Extension = IIf(IsDBNull(lrsDatos("extension")), "", lrsDatos("extension")), _
+                                                              .Estatus = lrsDatos("estatus")}, "C" & lrsDatos("folio"))
+                End While
+                lrsDatos.Close()
+                lrsDatos = Nothing
+            End If
+
+            If laListaArchivos.Count > 0 Then
+                write_Log("INFO|DesencriptarArchivos|Comienza la desencripcion, se detectaron " & laListaArchivos.Count & " archivos pgp.")
+
+                Try
+                    For Each Archivo As ArchivosGPH In laListaArchivos
+                        strEx = ""
+                        Try
+                            Dim pgp As New PGPLib()
+                            Dim inputFileLocation As String = gsRutaFilesDescarga & Archivo.Nombre & Archivo.Extension
+                            Dim privateKeyLocation As String = gsRutaKeys & gsLlavePrivada
+                            Dim outputFile As String = gsRutaFilesXML & Archivo.Nombre & ".xml"
+                            Dim originalFileName As String
+                            originalFileName = pgp.DecryptFile(inputFileLocation, privateKeyLocation, gsClaveLlavesPGP, outputFile)
+                        Catch ex As Exception
+                            strEx = ex.Message
+                        End Try
+
+                        If strEx <> "" Then
+                            write_Log("INFO|DesencriptarArchivos|Error en la desencripcion del archivo pgp " & Archivo.Nombre & " - " & strEx)
+
+                            lsSQL = "UPDATE TB_SRV_GPH_PLAN_TRABAJO_DETALLE SET flg_con_error = 1, flg_terminado = 0, fecha_fin = GETDATE() WHERE folio = " & Archivo.Folio & " AND tipo_operacion = " & textoSQL(gsTipoOperacion) & " AND alias_proceso = " & textoSQL(strAliasProceso) & ";" & vbCrLf
+                            lsSQL += "UPDATE TB_SRV_GPH_PLAN_TRABAJO_MAESTRO SET flg_con_error = 1, estatus = 'RECHAZADO', fecha_fin = GETDATE(), err_descripcion = " & textoSQL(strEx) & " WHERE folio = " & Archivo.Folio & " AND tipo_operacion = " & textoSQL(gsTipoOperacion) & ";" & vbCrLf
+                            goTOMI_Database.Execute_Command(lsSQL.ToString)
+                        Else
+                            write_Log("INFO|DesencriptarArchivos|Se termina la desencripcion deL archivo pgp " & Archivo.Nombre)
+                            write_Log("INFO|DesencriptarArchivos|Moviendo registro de Archivo: '" & gsRutaFilesDescargaBackUp & Archivo.Nombre & Archivo.Extension)
+                            Dim fInfo As New FileInfo(gsRutaFilesDescarga & Archivo.Nombre & Archivo.Extension)
+                            MoveFile(fInfo, gsRutaFilesDescargaBackUp & Archivo.Nombre & Archivo.Extension)
+
+                            lsSQL = "UPDATE TB_SRV_GPH_PLAN_TRABAJO_DETALLE SET flg_terminado = 1, flg_con_error = 0, fecha_fin = GETDATE() WHERE folio = " & Archivo.Folio & " AND tipo_operacion = " & textoSQL(gsTipoOperacion) & " AND alias_proceso = " & textoSQL(strAliasProceso) & ";" & vbCrLf
+                            lsSQL += "UPDATE TB_SRV_GPH_PLAN_TRABAJO_MAESTRO SET flg_con_error = 0, err_descripcion = '', estatus = 'DESENCRIPTADO' WHERE folio = " & Archivo.Folio & " AND tipo_operacion = " & textoSQL(gsTipoOperacion) & ";" & vbCrLf
+                            goTOMI_Database.Execute_Command(lsSQL.ToString)
+                        End If
+                    Next
+
+                Catch lexValArchivo As Exception
+                    write_Log("ERROR|DesencriptarArchivos|Error en la desencripcion de los archivos pgp. - " & lexValArchivo.ToString)
+                End Try
+            Else
+                write_Log("INFO|DesencriptarArchivos|No se encontraron archivos pgp para desencriptar.")
+            End If
+
+        Catch lexTarea As Exception
+            write_Log("ERROR|DesencriptarArchivos|Se presenta exception: " & lexTarea.ToString)
+        End Try
+    End Sub
+
+    Private Sub DownloadFiles()
+        Dim laListaArchivos As Collection
+        Dim lsSQL As String
+        Dim lrsDatos As DbDataReader
+        Dim intArchivos As Integer = 0
+        Dim lsFolio As Long = 0
+        Dim lbResultado As Boolean
+
+        Dim strAliasProceso As String = "DESCARGA_ARCHIVO_ENTRADA"
+
+        Try
+            laListaArchivos = New Collection()
+
+
+            lsSQL = "SELECT (nombre_archivo + ISNULL(extension,'')) AS nombre FROM TB_SRV_GPH_PLAN_TRABAJO_MAESTRO WHERE fecha_inicio >= '" & gsFechaSistema.ToString.Substring(0, 4) & "-" & gsFechaSistema.ToString.Substring(4, 2) & "-" & gsFechaSistema.ToString.Substring(6, 2) & "'"
+            write_Log("INFO|DownloadFiles|Obteniendo lista de archivos general.|" & lsSQL)
+
+            lrsDatos = goTOMI_Database.Execute_Query(lsSQL)
+            If Not IsNothing(lrsDatos) Then
+                While lrsDatos.Read
+                    laListaArchivos.Add(lrsDatos.Item(0), lrsDatos.Item(0))
+                End While
+                lrsDatos.Close()
+                lrsDatos = Nothing
+            End If
+
+            ' Setup session options
+            Dim sessionOptions As New SessionOptions
+            With sessionOptions
+                ' Parametros por sistemas
+                .Protocol = Protocol.Sftp
+                .HostName = gsRemoteHostNameSFTP
+                .UserName = gsRemoteUsrSFTP
+                .Password = gsRemotePasswordSFTP
+                If gsSshPortNumberHostSFTP <> String.Empty Then
+                    .PortNumber = gsSshPortNumberHostSFTP
+                End If
+                .SshHostKeyFingerprint = gsSshHostKeySFTP
+                .SshPrivateKeyPath = gsSshPrivateKeyPathSFTP
+            End With
+            write_Log("INFO|DownloadFiles|Setup session options, ready")
+            Using session As New Session
+                ' Connect
+                session.Open(sessionOptions)
+                write_Log("INFO|DownloadFiles|Connection, ready")
+
+                ' Download files
+                Dim transferOptions As New TransferOptions
+                transferOptions.TransferMode = TransferMode.Automatic
+                write_Log("INFO|DownloadFiles|Download begin, ready")
+                Dim transferResult As TransferOperationResult
+                transferResult = session.GetFiles(gsRutaFilesRemote, gsRutaFilesDescarga)
+                write_Log("INFO|DownloadFiles|Download end, ready")
+
+                ' Throw on any error
+                transferResult.Check()
+
+                ' Iterate over every transfer
+                Dim transfer As WinSCP.TransferEventArgs
+                ' Print results
+                For Each transfer In transferResult.Transfers
+                    write_Log("INFO|DownloadFiles|Download of " & transfer.FileName & ", succeeded")
+                Next
+            End Using
+
+            write_Log("INFO|DescargarArchivos|* * * * * *  Descarga de Archivos GPH por SFTP Completa   * * * * * * * * * * *")
+            write_Log("INFO|DescargarArchivos|=========================================================================")
+
+            ' Valida la salida          
+            write_Log("INFO|DescargarArchivos|***** Iniciando validación de salida.")
+
+            Try
+                Dim Folder As New DirectoryInfo(gsRutaFilesDescarga)
+                For Each file As FileInfo In Folder.GetFiles()
+                    Dim Extension As String = Path.GetExtension(gsRutaFilesDescarga & file.Name)
+                    Dim strEstatus As String = ""
+
+                    If Not laListaArchivos.Contains(file.Name) Then
+                        write_Log("INFO|DescargarArchivos|Insertando registro de Archivo: '" & file.Name & "'.")
+
+                        lbResultado = Create_Workplan(gsTipoOperacion, gsRutaFilesDescarga, Replace(file.Name, Extension, ""), Extension, "DESCARGADO", strAliasProceso, 0, 0, 0)
+
+                        If lbResultado Then
+                            write_Log("INFO|DescargarArchivos|Se insertó correctamente el folio en base de TOMI.")
+                        End If
+                        intArchivos += 1
+                    End If
+                Next
+                write_Log("INFO|DescargarArchivos|Se termina la descarga de " & intArchivos & " archivos GPH.")
+            Catch lexValArchivo As Exception
+                write_Log("INFO|DescargarArchivos|Error en la descarga de los archivos GPH. -" & lexValArchivo.ToString)
+            End Try
+
+        Catch lexTarea As Exception
+            write_Log("ERROR|DownloadFiles|Se presenta exception: " & lexTarea.ToString)
+        Finally
+            If Not IsNothing(lrsDatos) Then
+                lrsDatos.Close()
+                lrsDatos = Nothing
+            End If
+        End Try
+    End Sub
+
+    Private Sub MoveFile(fInfo As FileInfo, destPath As String)
+        ' Create a FileInfo instance, and get the full path 
+        ' to the parent directory.
+        Dim fInfoDest As FileInfo = New FileInfo(destPath)
+        Dim dirPath As String = fInfoDest.Directory.FullName
+        write_Log("INFO|MoveFile|Verifica si el directorio BackUp existe, si no existe lo crea: " & dirPath)
+        ' If the directory does not exist, create it.
+        If Not Directory.Exists(dirPath) Then
+            Directory.CreateDirectory(dirPath)
+        End If
+        write_Log("INFO|MoveFile|Verifica si el archivo existe en BackUp, si existe lo elimina: " & destPath)
+        ' If DestFile.xml exists, delete it.
+        If File.Exists(destPath) Then
+            File.Delete(destPath)
+        End If
+        fInfo.MoveTo(destPath)
+    End Sub
+
+    Private Function Create_Workplan(ByVal tipo_operacion As String, ByVal ruta As String, ByVal nombre_archivo As String, ByVal extension As String, ByVal status As String, ByVal alias_proceso As String, ByVal flg_cierre As Int32, ByVal flg_terminado As Int32, ByVal flg_con_error As Int32) As Boolean
+        Try
+            '=================================================================================================================        
+            'Store Procedure Definition
+            '=================================================================================================================        
+            Dim loCmd As DbCommand = goTOMI_Database.newCommand("usp_TOMBIN_INSERT_FILE_GPH")
+            loCmd.CommandType = CommandType.StoredProcedure
+            Dim blnRegreso As Boolean = False
+
+            '=================================================================================================================
+            'Parameter Definition
+            '=================================================================================================================        
+            loCmd.Parameters.Clear()
+            ' Parameter 1
+            Dim lptipo_operacion As DbParameter = loCmd.CreateParameter()
+            lptipo_operacion.ParameterName = "@tipo_operacion"
+            lptipo_operacion.DbType = DbType.String
+            lptipo_operacion.Size = 20
+            lptipo_operacion.Direction = ParameterDirection.Input
+            lptipo_operacion.Value = tipo_operacion
+            loCmd.Parameters.Add(lptipo_operacion)
+
+            ' Parameter 2
+            Dim lpruta As DbParameter = loCmd.CreateParameter()
+            lpruta.ParameterName = "@ruta"
+            lpruta.DbType = DbType.String
+            lpruta.Size = 200
+            lpruta.Direction = ParameterDirection.Input
+            lpruta.Value = ruta
+            loCmd.Parameters.Add(lpruta)
+
+            ' Parameter 3
+            Dim lpNombre_archivo As DbParameter = loCmd.CreateParameter()
+            lpNombre_archivo.ParameterName = "@nombre_archivo"
+            lpNombre_archivo.DbType = DbType.String
+            lpNombre_archivo.Size = 500
+            lpNombre_archivo.Direction = ParameterDirection.Input
+            lpNombre_archivo.Value = nombre_archivo
+            loCmd.Parameters.Add(lpNombre_archivo)
+
+            ' Parameter 4
+            Dim lpExtension As DbParameter = loCmd.CreateParameter()
+            lpExtension.ParameterName = "@extension"
+            lpExtension.DbType = DbType.String
+            lpExtension.Size = 6
+            lpExtension.Direction = ParameterDirection.Input
+            lpExtension.Value = extension
+            loCmd.Parameters.Add(lpExtension)
+
+            ' Parameter 5
+            Dim lpEstatus As DbParameter = loCmd.CreateParameter()
+            lpEstatus.ParameterName = "@estatus"
+            lpEstatus.DbType = DbType.String
+            lpEstatus.Size = 20
+            lpEstatus.Direction = ParameterDirection.Input
+            lpEstatus.Value = status
+            loCmd.Parameters.Add(lpEstatus)
+
+            ' Parameter 6
+            Dim lpAlias_proceso As DbParameter = loCmd.CreateParameter()
+            lpAlias_proceso.ParameterName = "@strAliasProceso"
+            lpAlias_proceso.DbType = DbType.String
+            lpAlias_proceso.Size = 30
+            lpAlias_proceso.Direction = ParameterDirection.Input
+            lpAlias_proceso.Value = alias_proceso
+            loCmd.Parameters.Add(lpAlias_proceso)
+
+            ' Parameter 7
+            Dim lpflg_cierre As DbParameter = loCmd.CreateParameter()
+            lpflg_cierre.ParameterName = "@flg_cierre"
+            lpflg_cierre.DbType = DbType.Int32
+            lpflg_cierre.Direction = ParameterDirection.Input
+            lpflg_cierre.Value = flg_cierre
+            loCmd.Parameters.Add(lpflg_cierre)
+
+            ' Parameter 8
+            Dim lpflg_terminado As DbParameter = loCmd.CreateParameter()
+            lpflg_terminado.ParameterName = "@flg_terminado"
+            lpflg_terminado.DbType = DbType.Int32
+            lpflg_terminado.Direction = ParameterDirection.Input
+            lpflg_terminado.Value = flg_terminado
+            loCmd.Parameters.Add(lpflg_terminado)
+
+            ' Parameter 9
+            Dim lpflg_con_error As DbParameter = loCmd.CreateParameter()
+            lpflg_con_error.ParameterName = "@flg_con_error"
+            lpflg_con_error.DbType = DbType.Int32
+            lpflg_con_error.Direction = ParameterDirection.Input
+            lpflg_con_error.Value = flg_con_error
+            loCmd.Parameters.Add(lpflg_con_error)
+
+            ' Parameter Output
+            Dim lpSalida As DbParameter = loCmd.CreateParameter()
+            lpSalida.ParameterName = "@Salida"
+            lpSalida.DbType = DbType.Int32
+            lpSalida.Direction = ParameterDirection.Output
+            lpSalida.Value = -1
+            loCmd.Parameters.Add(lpSalida)
+
+            '=================================================================================================================
+            'Finish parameter definition and make the call
+            '=================================================================================================================        
+
+            For Each Parametro As DbParameter In loCmd.Parameters
+                write_Log("INFO|Create_Workplan|" & Parametro.ParameterName & "=" & Parametro.Value)
+            Next
+
+            loCmd.ExecuteNonQuery()
+            loCmd = Nothing
+
+            write_Log("INFO|Create_Workplan|Salida=" & lpSalida.Value & ".")
+
+            ' Return Output
+            blnRegreso = IIf(lpSalida.Value = 0, False, True)
+
+            Return blnRegreso
+        Catch ex As Exception
+            write_Log("ERROR|Create_Workplan|Se presenta exception: " & ex.Message & ". Trace: " & ex.ToString)
+        End Try
+        Return False
+    End Function
+End Module
 
