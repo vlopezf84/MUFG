@@ -92,3 +92,162 @@ Module Module1
     End Function
 
 End Module
+'*******************************
+
+
+Imports System
+Imports System.Collections.Generic
+Imports System.IO
+Imports System.Net
+Imports System.Text
+Imports System.Data
+Imports System.Data.SqlClient
+Imports Newtonsoft.Json
+Imports Newtonsoft.Json.Linq
+
+Module Module2
+
+    Sub Main()
+        ' 1. Obtener los valores únicos del HashSet (simulamos que ya los tenemos)
+        Dim groupingCriteriaSet As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+            "DEUTSCHE BANK AG CD00094109",
+            "OTRO BANK AG CD00094109",
+            "DENSO MEXICO, S.A. DE C.V.  CD00036268"
+        }
+
+        ' 2. Procesar cada elemento del HashSet
+        For Each criteria In groupingCriteriaSet
+            Try
+                ' Extraer el ID (CDxxxxxxx)
+                Dim entityId As String = ExtractEntityId(criteria)
+                
+                ' Consultar la API
+                Dim apiResponse As String = QueryApiWithCriteria(criteria)
+                
+                ' Procesar la respuesta JSON
+                Dim (freeLimit, limit) = ParseApiResponse(apiResponse)
+                
+                ' Ejecutar el stored procedure
+                ExecuteInsertSP(entityId, freeLimit, limit)
+                
+                Console.WriteLine($"Procesado exitosamente: {criteria}")
+            Catch ex As Exception
+                Console.WriteLine($"Error procesando {criteria}: {ex.Message}")
+            End Try
+        Next
+
+        Console.WriteLine("Proceso completado. Presione cualquier tecla para salir...")
+        Console.ReadKey()
+    End Sub
+
+    Function ExtractEntityId(fullName As String) As String
+        ' Buscar el patrón CD seguido de 8 dígitos
+        Dim pattern As String = "CD\d{8}"
+        Dim match = System.Text.RegularExpressions.Regex.Match(fullName, pattern)
+        
+        If match.Success Then
+            Return match.Value
+        Else
+            Throw New ArgumentException($"No se pudo extraer el ID de: {fullName}")
+        End If
+    End Function
+
+    Function QueryApiWithCriteria(criteria As String) As String
+        Dim apiUrl As String = "https://10.10.10.10:9301/api/v1/headroom" ' Ajusta la URL
+        Dim username As String = "tu_usuario"
+        Dim password As String = "tu_contraseña"
+
+        ' Crear el cuerpo JSON para la solicitud POST
+        Dim requestBody As String = $"{{
+            ""aggregationParamsList"": [
+                {{
+                    ""ruleCodes"": [
+                        ""FxSpotAbsNotional USD""
+                    ],
+                    ""groupingValuesList"": [
+                        {{
+                            ""columnsWithValues"": {{
+                                ""CounterParty.Short Name"": ""{criteria}""
+                            }}
+                        }}
+                    ]
+                }}
+            ]
+        }}"
+
+        ' Configurar la solicitud HTTP
+        Dim request As HttpWebRequest = DirectCast(WebRequest.Create(apiUrl), HttpWebRequest)
+        request.Method = "POST"
+        request.ContentType = "application/json"
+        
+        ' Configurar autenticación básica
+        Dim authInfo As String = username + ":" + password
+        authInfo = Convert.ToBase64String(Encoding.Default.GetBytes(authInfo))
+        request.Headers("Authorization") = "Basic " + authInfo
+
+        ' Configurar SSL/TLS para .NET 4.5
+        ServicePointManager.SecurityProtocol = CType(3072 Or 768, SecurityProtocolType) ' Tls12 | Tls11
+        ServicePointManager.ServerCertificateValidationCallback = Function(sender, certificate, chain, sslPolicyErrors) True
+
+        ' Escribir el cuerpo de la solicitud
+        Using streamWriter As New StreamWriter(request.GetRequestStream())
+            streamWriter.Write(requestBody)
+            streamWriter.Flush()
+        End Using
+
+        ' Obtener la respuesta
+        Using response As HttpWebResponse = DirectCast(request.GetResponse(), HttpWebResponse)
+            Using reader As New StreamReader(response.GetResponseStream())
+                Return reader.ReadToEnd()
+            End Using
+        End Using
+    End Function
+
+    Function ParseApiResponse(jsonResponse As String) As (Decimal, Decimal)
+        Try
+            ' Parsear el JSON (asumiendo que es un array como en el ejemplo)
+            Dim jsonArray As JArray = JArray.Parse(jsonResponse)
+            
+            If jsonArray.Count = 0 Then
+                Throw New Exception("La respuesta de la API no contiene datos")
+            End If
+
+            ' Tomar el primer elemento del array
+            Dim firstItem As JObject = DirectCast(jsonArray(0), JObject)
+            
+            ' Extraer y convertir los valores numéricos
+            Dim freeLimitStr As String = firstItem("FREE_LIMIT").ToString()
+            Dim limitValue As Decimal = Convert.ToDecimal(firstItem("LIMIT"))
+            
+            ' Limpiar y convertir FREE_LIMIT (remover comas y formato de moneda)
+            freeLimitStr = freeLimitStr.Replace(",", "").Replace("$", "").Trim()
+            Dim freeLimit As Decimal = Convert.ToDecimal(freeLimitStr)
+            
+            Return (freeLimit, limitValue)
+        Catch ex As Exception
+            Throw New Exception($"Error procesando la respuesta JSON: {ex.Message}")
+        End Try
+    End Function
+
+    Sub ExecuteInsertSP(entityId As String, freeLimit As Decimal, limit As Decimal)
+        Dim connectionString As String = "Tu_Cadena_De_Conexion_A_SQL"
+        
+        Using connection As New SqlConnection(connectionString)
+            Using command As New SqlCommand("Insertar", connection)
+                command.CommandType = CommandType.StoredProcedure
+                
+                ' Agregar parámetros
+                command.Parameters.Add("@EntityId", SqlDbType.VarChar, 10).Value = entityId
+                command.Parameters.Add("@FreeLimit", SqlDbType.Decimal).Value = freeLimit
+                command.Parameters.Add("@Limit", SqlDbType.Decimal).Value = limit
+                
+                ' Ejecutar el SP
+                connection.Open()
+                command.ExecuteNonQuery()
+            End Using
+        End Using
+    End Sub
+
+End Module
+
+
