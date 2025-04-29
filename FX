@@ -261,3 +261,55 @@ Module Module3
     End Sub
 
 End Module
+
+''*******************
+
+Sub ProcessApiResponse(jsonResponse As String)
+    Try
+        ' Primero intentamos parsear como JArray
+        Dim jsonToken As JToken = JToken.Parse(jsonResponse)
+        
+        Dim responseItems As List(Of JObject) = New List(Of JObject)()
+        
+        ' Verificar si es un array (respuesta múltiple)
+        If jsonToken.Type = JTokenType.Array Then
+            responseItems = jsonToken.Select(Function(item) CType(item, JObject)).ToList()
+        ElseIf jsonToken.Type = JTokenType.Object Then
+            ' Si es un solo objeto, lo agregamos a la lista
+            responseItems.Add(CType(jsonToken, JObject))
+        Else
+            Throw New Exception("Formato de respuesta no reconocido")
+        End If
+        
+        ' Procesar cada item de respuesta
+        For Each item As JObject In responseItems
+            Try
+                ' Verificar si contiene los campos requeridos
+                If item("WARNING_VALUE") Is Nothing OrElse item("FREE_LIMIT") Is Nothing OrElse item("LIMIT") Is Nothing Then
+                    Console.WriteLine("Elemento de respuesta no contiene todos los campos requeridos")
+                    Continue For
+                End If
+                
+                ' Extraer el nombre completo del criterio
+                Dim fullName As String = item("WARNING_VALUE").ToString()
+                
+                ' Extraer el ID (CDxxxxxxx)
+                Dim entityId As String = ExtractEntityId(fullName)
+                
+                ' Convertir los valores numéricos
+                Dim freeLimit As Decimal = ConvertFreeLimit(item("FREE_LIMIT").ToString())
+                Dim limit As Decimal = Convert.ToDecimal(item("LIMIT"))
+                
+                ' Ejecutar el stored procedure
+                ExecuteInsertSP(entityId, freeLimit, limit)
+                
+                Console.WriteLine($"Procesado exitosamente: {fullName}")
+            Catch ex As Exception
+                Console.WriteLine($"Error procesando un elemento de la respuesta: {ex.Message}")
+            End Try
+        Next
+    Catch ex As Exception
+        Console.WriteLine($"Error procesando la respuesta de la API: {ex.Message}")
+        Console.WriteLine($"Respuesta recibida: {jsonResponse}")
+    End Try
+End Sub
