@@ -266,16 +266,15 @@ End Module
 
 Sub ProcessApiResponse(jsonResponse As String)
     Try
-        ' Primero intentamos parsear como JArray
+        ' Parsear el JSON recibido
         Dim jsonToken As JToken = JToken.Parse(jsonResponse)
         
         Dim responseItems As List(Of JObject) = New List(Of JObject)()
         
-        ' Verificar si es un array (respuesta múltiple)
+        ' Manejar tanto arrays como objetos individuales
         If jsonToken.Type = JTokenType.Array Then
             responseItems = jsonToken.Select(Function(item) CType(item, JObject)).ToList()
         ElseIf jsonToken.Type = JTokenType.Object Then
-            ' Si es un solo objeto, lo agregamos a la lista
             responseItems.Add(CType(jsonToken, JObject))
         Else
             Throw New Exception("Formato de respuesta no reconocido")
@@ -284,21 +283,29 @@ Sub ProcessApiResponse(jsonResponse As String)
         ' Procesar cada item de respuesta
         For Each item As JObject In responseItems
             Try
-                ' Verificar si contiene los campos requeridos
-                If item("WARNING_VALUE") Is Nothing OrElse item("FREE_LIMIT") Is Nothing OrElse item("LIMIT") Is Nothing Then
-                    Console.WriteLine("Elemento de respuesta no contiene todos los campos requeridos")
+                ' Obtener el valor del criterio (usando GROUPING_COLUMN_MAP_NO_ALIAS)
+                Dim groupingMap As JObject = item("GROUPING_COLUMN_MAP_NO_ALIAS")
+                If groupingMap Is Nothing Then
+                    Console.WriteLine("Elemento no contiene GROUPING_COLUMN_MAP_NO_ALIAS")
                     Continue For
                 End If
                 
-                ' Extraer el nombre completo del criterio
-                Dim fullName As String = item("WARNING_VALUE").ToString()
+                Dim fullName As String = groupingMap("CounterParty.Short Name").ToString()
                 
                 ' Extraer el ID (CDxxxxxxx)
                 Dim entityId As String = ExtractEntityId(fullName)
                 
-                ' Convertir los valores numéricos
-                Dim freeLimit As Decimal = ConvertFreeLimit(item("FREE_LIMIT").ToString())
-                Dim limit As Decimal = Convert.ToDecimal(item("LIMIT"))
+                ' Obtener los valores numéricos (usando FREE_LIMIT y LIMIT del JSON)
+                Dim freeLimit As Decimal = 0
+                Dim limit As Decimal = 0
+                
+                If item("FREE_LIMIT") IsNot Nothing Then
+                    freeLimit = ConvertFreeLimit(item("FREE_LIMIT").ToString())
+                End If
+                
+                If item("LIMIT") IsNot Nothing Then
+                    limit = Convert.ToDecimal(item("LIMIT"))
+                End If
                 
                 ' Ejecutar el stored procedure
                 ExecuteInsertSP(entityId, freeLimit, limit)
