@@ -67,3 +67,9 @@ Responsible for the elimination of real data
 Aquí puedes aclarar que no se extraerán datos, solo se consultan.
 
 No data extraction, replication, or storage outside the production environment will occur. The activity consists only of executing read-only SQL queries to validate specific records related to the incident. Therefore, no additional data handling or deletion process is required
+
+The exercise requires executing two controlled read-only SQL queries in the production database to validate specific records associated with an incident related to data population in the Sentinel system.
+
+The objective is to verify whether certain fields originating from SWIFT PACS messages are correctly stored in the database and to identify at which stage of the system workflow the data may be missing or incorrectly populated.
+
+The queries will be limited to specific transaction identifiers associated with the reported incident. No bulk extraction of customer data or historical datasets will be performed.
