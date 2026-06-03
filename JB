@@ -1,0 +1,52 @@
+CREATE PROCEDURE dbo.SP_ARCHIVA_TBL_SENTINEL_INTERCAMBIO
+AS
+BEGIN
+
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+
+        BEGIN TRANSACTION;
+
+        INSERT INTO dbo.TBL_SENTINEL_INTERCAMBIO_HST
+        (
+            id_envio,
+            fn_folio,
+            UETR,
+            id_transaction,
+            tipo_operacion,
+            status,
+            status_Sentinel,
+            Json_out,
+            date_out,
+            desc_error
+        )
+        SELECT
+            id_envio,
+            fn_folio,
+            UETR,
+            id_transaction,
+            tipo_operacion,
+            status,
+            status_Sentinel,
+            Json_out,
+            date_out,
+            desc_error
+        FROM dbo.TBL_SENTINEL_INTERCAMBIO;
+
+        DELETE FROM dbo.TBL_SENTINEL_INTERCAMBIO;
+
+        COMMIT TRANSACTION;
+
+    END TRY
+    BEGIN CATCH
+
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+
+        THROW;
+
+    END CATCH
+
+END;
+GO
