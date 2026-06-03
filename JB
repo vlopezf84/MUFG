@@ -1,52 +1,28 @@
-CREATE PROCEDURE dbo.SP_ARCHIVA_TBL_SENTINEL_INTERCAMBIO
-AS
-BEGIN
+USE msdb;
+GO
 
-    SET NOCOUNT ON;
+EXEC dbo.sp_add_job
+    @job_name = N'JOB_ARCHIVA_TBL_SENTINEL_INTERCAMBIO',
+    @enabled = 1,
+    @description = N'Archiva diariamente los registros de TBL_SENTINEL_INTERCAMBIO hacia TBL_SENTINEL_INTERCAMBIO_HST';
+GO
 
-    BEGIN TRY
+EXEC dbo.sp_add_jobstep
+    @job_name = N'JOB_ARCHIVA_TBL_SENTINEL_INTERCAMBIO',
+    @step_name = N'Archivar Informacion',
+    @subsystem = N'TSQL',
+    @database_name = N'<NOMBRE_BD>',
+    @command = N'EXEC dbo.SP_ARCHIVA_TBL_SENTINEL_INTERCAMBIO;';
+GO
 
-        BEGIN TRANSACTION;
+EXEC dbo.sp_add_jobschedule
+    @job_name = N'JOB_ARCHIVA_TBL_SENTINEL_INTERCAMBIO',
+    @name = N'DIARIO_2300',
+    @freq_type = 4,
+    @freq_interval = 1,
+    @active_start_time = 230000;
+GO
 
-        INSERT INTO dbo.TBL_SENTINEL_INTERCAMBIO_HST
-        (
-            id_envio,
-            fn_folio,
-            UETR,
-            id_transaction,
-            tipo_operacion,
-            status,
-            status_Sentinel,
-            Json_out,
-            date_out,
-            desc_error
-        )
-        SELECT
-            id_envio,
-            fn_folio,
-            UETR,
-            id_transaction,
-            tipo_operacion,
-            status,
-            status_Sentinel,
-            Json_out,
-            date_out,
-            desc_error
-        FROM dbo.TBL_SENTINEL_INTERCAMBIO;
-
-        DELETE FROM dbo.TBL_SENTINEL_INTERCAMBIO;
-
-        COMMIT TRANSACTION;
-
-    END TRY
-    BEGIN CATCH
-
-        IF @@TRANCOUNT > 0
-            ROLLBACK TRANSACTION;
-
-        THROW;
-
-    END CATCH
-
-END;
+EXEC dbo.sp_add_jobserver
+    @job_name = N'JOB_ARCHIVA_TBL_SENTINEL_INTERCAMBIO';
 GO
