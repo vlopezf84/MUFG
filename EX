@@ -1,0 +1,276 @@
+Imports CrystalDecisions.Shared
+Imports CrystalDecisions.CrystalReports.Engine
+Imports FrameWork
+Imports System.Data.SqlClient
+Imports TOMI.NET_BUS
+
+Public Class frmReporteT24
+
+    Dim cFunc As New ClassFunciones
+    Public sBoton As String
+    Public sReporte As String
+    Public sFormula As String
+    Public sCriterio As String
+
+    Private Sub frmImpresion_Disposed(sender As Object, e As System.EventArgs) Handles Me.Disposed
+        crptViewer.Dispose()
+    End Sub
+
+    Private Sub frmImpresion_Load(sender As System.Object, e As System.EventArgs) Handles MyBase.Load
+
+        Dim cr As New ReportDocument                                    '- variable para llamar el documento y obtener su información -
+        Dim crParameterDiscreteValue As ParameterDiscreteValue          '- variable para valores discretos -
+        Dim crParameterFieldDefinitions As ParameterFieldDefinitions    '- variable para definiciones de parámetros -
+        Dim crParameterFieldLocation As ParameterFieldDefinition        '- variable para definición individual de parámetro -
+        Dim crParameterValues As ParameterValues                        '- variable para valores de parámetro -
+        Dim crDataSourceInfo As DataSourceConnections                   '- variable para valores de conexión -
+        Dim sSelectFormula As String = Nothing
+        Dim crTableLogoninfos As New TableLogOnInfos                    '- variable para información de conexión de las tablas -
+        Dim crTableLogoninfo As New TableLogOnInfo                      '- variable para información de conexión de una tabla -
+        Dim crConnectionInfo As New ConnectionInfo                      '- variable para información de conexión general -
+        Dim CrTables As Tables                                          '- variable para las tablas contenidas en el reporte -
+        Dim CrTable As Table                                            '- variable para recorrer cada tabla contenida en el reporte -
+
+        Dim sDBParametros As String() = Nothing
+
+        Dim sCadena As String = ""
+
+        Dim objDat As New DatT24
+        Dim Parametros As New Collection
+        Dim sSQL As String
+        Dim blnAux As Boolean = False
+
+        Dim objRutasReporte As New RutasReporteT24
+
+        Try
+            If sReporte.Contains("CD01_") Or sReporte.Contains("CD02_") Then
+                sSQL = "SELECT RUTA, RUTA_DATOS_REPORTE FROM " & sDBSQL & ".dbo.TB_CAT_REPORTS WHERE ID_REPORTE = @Reporte " & ";"
+                Parametros.Add(New Parametro("Reporte", Data.SqlDbType.VarChar, sReporte.Substring(0, InStr(1, sReporte, "_") - 1)))
+            Else
+                sSQL = "SELECT RUTA, RUTA_DATOS_REPORTE FROM " & sDBSQL & ".dbo.TB_CAT_REPORTS WHERE ID_REPORTE = @Reporte " & ";"
+                Parametros.Add(New Parametro("Reporte", Data.SqlDbType.VarChar, sReporte))
+            End If
+
+            Using Lector As SqlDataReader = objDat.EjecutarComandoReader(sSQL, Parametros)
+                If Lector.Read Then
+                    objRutasReporte = New RutasReporteT24 With {.Ruta = Lector("RUTA"), .Ruta_Datos = Lector("RUTA_DATOS_REPORTE")}
+                    blnAux = True
+                End If
+            End Using
+
+            objDat.Dispose()
+
+        Catch ex As Exception
+            MsgBox("Error al obtener los datos del reporte - " & ex.ToString, MsgBoxStyle.Critical, "Error")
+            objDat.Dispose()
+            Exit Sub
+        End Try
+      
+        If blnAux Then
+            sRutaReportes = objRutasReporte.Ruta & IIf(objRutasReporte.Ruta.ToString.Substring(Len(objRutasReporte.Ruta) - 1, 1) = "\", "", "\")
+            sRutaReportes = "C:\TOMI_NET\Reportes\T24_Reportes\"
+            sDBParametros = objRutasReporte.Ruta_Datos.ToString.Split("|")
+
+            'sRutaReportes = "D:\T24_Reportes\"
+
+            '- cargar el reporte -
+            Try
+                cr.Load(sRutaReportes & sReporte & ".rpt")
+            Catch ex As Exception
+                MsgBox("No es posible cargar el reporte " & sRutaReportes & sReporte & ".rpt", vbExclamation)
+                cr.Close()
+                Exit Sub
+            End Try
+
+            '- definir parámetros de conexión de la base de datos -
+            With crConnectionInfo
+                .ServerName = sDBParametros(0)
+                .DatabaseName = sDBParametros(1)
+                .UserID = sUsuarioSQL
+                .Password = sPasswordSQL
+            End With
+
+            '- obtener la información de las tablas involucradas en el reporte -
+            CrTables = cr.Database.Tables
+
+            '- recorrer las tablas involucradas -
+            For Each CrTable In CrTables
+                crTableLogoninfo = CrTable.LogOnInfo
+                crTableLogoninfo.ConnectionInfo = crConnectionInfo
+                CrTable.ApplyLogOnInfo(crTableLogoninfo)
+            Next
+
+            For Each subrep As ReportDocument In cr.Subreports
+                For Each table As Table In subrep.Database.Tables
+                    table.LogOnInfo.ConnectionInfo = crConnectionInfo
+                    table.ApplyLogOnInfo(table.LogOnInfo)
+                Next
+            Next
+
+            ''- obtener la información de las tablas involucradas en el subreporte -
+            'CrTables = cr.Subreports("Formato.rpt").Database.Tables
+
+            ''- recorrer las tablas involucradas -
+            'For Each CrTable In CrTables
+            '    crTableLogoninfo = CrTable.LogOnInfo
+            '    crTableLogoninfo.ConnectionInfo = crConnectionInfo
+            '    CrTable.ApplyLogOnInfo(crTableLogoninfo)
+            'Next
+
+            'Assign data source details to the report viewer
+            If crptViewer.LogOnInfo IsNot Nothing Then
+                Dim tlInfo As TableLogOnInfos = crptViewer.LogOnInfo
+                For Each tbloginfo As TableLogOnInfo In tlInfo
+                    tbloginfo.ConnectionInfo = crConnectionInfo
+                Next
+            End If
+            cr.VerifyDatabase()
+            cr.Refresh()
+
+            If sReporte.Substring(0, 2) = "CD" Then
+                '- obtener la información de las tablas involucradas en el subreporte -
+                CrTables = cr.Subreports("Comisiones").Database.Tables
+
+                '- recorrer las tablas involucradas -
+                For Each CrTable In CrTables
+                    crTableLogoninfo = CrTable.LogOnInfo
+                    crTableLogoninfo.ConnectionInfo = crConnectionInfo
+                    CrTable.ApplyLogOnInfo(crTableLogoninfo)
+                Next
+            End If
+
+            '- definir parámetros de vista -
+            crptViewer.ToolPanelView = CrystalDecisions.Windows.Forms.ToolPanelViewType.GroupTree = 0
+            crptViewer.ShowGroupTreeButton = False
+
+            '----------------------------------------------------------------
+            '- enviar valores para los parámetros de selección de registros -
+            '----------------------------------------------------------------
+
+            If Not sReporte.Contains("GL_") Then
+                '- definir el criterio de selección del subreporte -
+                cr.Subreports("Formato.rpt").RecordSelectionFormula = "{TB_CAT_REPORTS.ID_REPORTE} = '" & sBoton & "'"
+            End If
+
+            sCadena = sFormula
+
+            While sCadena.Contains("LIKE '**'")
+                If sCadena.Contains("LIKE '**'") Then
+                    '- encuentra el último LIKE '**'
+                    Dim iFound As Integer = sCadena.LastIndexOf("LIKE '**'")
+                    Dim iAnd As Integer = sCadena.LastIndexOf("AND")
+
+                    If iAnd <> -1 Then
+                        If iAnd < iFound Then
+                            sCadena = sCadena.Substring(0, iAnd)
+                        Else
+                            While iAnd > iFound
+                                iAnd = sCadena.LastIndexOf("AND", iAnd)
+                            End While
+                            If iAnd <> -1 Then
+                                sCadena = sCadena.Substring(0, iAnd) & sCadena.Substring(sCadena.IndexOf("AND", iFound))
+                            Else
+                                sCadena = sCadena.Substring(sCadena.IndexOf("AND", iFound) + 3)
+                            End If
+                        End If
+                    Else
+                        sCadena = ""
+                    End If
+                End If
+            End While
+
+            '- si no sufrió movimientos, le regresa lo mismo -
+            sFormula = sCadena
+            cr.RecordSelectionFormula = sFormula
+
+            '- "{@Periodo} >= 180 AND UpperCase({VW_RPT_T24_ACCOUNT_CURRENT.CATEGORY}) LIKE '**'"
+
+            '- definir el criterio de selección del reporte -
+            'sSelectFormula = sFormula
+            'crptViewer.SelectionFormula = sSelectFormula
+
+            '- obtener los parámetros definidos en el reporte (los que se definieron al crearlo en CR) -
+            crParameterFieldDefinitions = cr.DataDefinition.ParameterFields
+            crDataSourceInfo = cr.DataSourceConnections
+
+            If Not sReporte.Contains("GL_") Then
+                '- Tomar el parámetro (debe existir en el reporte) -
+                crParameterFieldLocation = crParameterFieldDefinitions.Item("Criterio Reporte")
+
+                '- Obtener los valores por default definidos -
+                crParameterValues = crParameterFieldLocation.CurrentValues
+
+                '- Crear una instancia de valor discrecional para un parámetro -
+                crParameterDiscreteValue = New CrystalDecisions.Shared.ParameterDiscreteValue
+
+                '- Definir el valor del parámetro -
+                If InStr(sCriterio, "/") Or InStr(sCriterio, "-") Then
+                    crParameterDiscreteValue.Value = sCriterio
+                Else
+                    crParameterDiscreteValue.Value = ""
+                End If
+
+                '- Agregar el parámetro y aplicarlo -
+                crParameterValues.Add(crParameterDiscreteValue)
+                crParameterFieldLocation.ApplyCurrentValues(crParameterValues)
+
+                '- Tomar el parámetro (debe existir en el reporte) -
+                crParameterFieldLocation = crParameterFieldDefinitions.Item("Usuario")
+
+                '- Obtener los valores por default definidos -
+                crParameterValues = crParameterFieldLocation.CurrentValues
+
+                '- Crear una instancia de valor discrecional para un parámetro -
+                crParameterDiscreteValue = New CrystalDecisions.Shared.ParameterDiscreteValue
+
+                '- Definir el valor del parámetro -
+                crParameterDiscreteValue.Value = "USER: " & UsuarioActual.UsuarioID
+
+                '- Agregar el parámetro y aplicarlo -
+                crParameterValues.Add(crParameterDiscreteValue)
+                crParameterFieldLocation.ApplyCurrentValues(crParameterValues)
+
+                If sReporte = "AC0148" Then
+                    '- Tomar el parámetro (debe existir en el reporte) -
+                    crParameterFieldLocation = crParameterFieldDefinitions.Item("ImageLocation")
+
+                    '- Obtener los valores por default definidos -
+                    crParameterValues = crParameterFieldLocation.CurrentValues
+
+                    '- Crear una instancia de valor discrecional para un parámetro -
+                    crParameterDiscreteValue = New CrystalDecisions.Shared.ParameterDiscreteValue
+
+                    '- Definir el valor del parámetro -
+                    crParameterDiscreteValue.Value = sRutaReportes & "MUFG.jpg"
+
+                    '- Agregar el parámetro y aplicarlo -
+                    crParameterValues.Add(crParameterDiscreteValue)
+                    crParameterFieldLocation.ApplyCurrentValues(crParameterValues)
+                End If
+            End If
+
+            '- definir el reporte que se visualiza -
+            crptViewer.ReportSource = cr
+
+            '- hacer visible el reporte -
+            crptViewer.Visible = True
+            crptViewer.Refresh()
+
+            'cr.DataSourceConnections.Clear()
+            'cr.DataDefinition.Dispose()
+            'Timer.Enabled = True
+        End If
+    End Sub
+
+    Private Sub Timer_Tick(sender As System.Object, e As System.EventArgs) Handles Timer.Tick
+        Me.Close()
+    End Sub
+
+    Private Sub crptViewer_Navigate(source As Object, e As CrystalDecisions.Windows.Forms.NavigateEventArgs) Handles crptViewer.Navigate
+        Timer.Stop()
+    End Sub
+
+    Private Sub frmImpresion_LostFocus(sender As Object, e As System.EventArgs) Handles Me.LostFocus
+        Timer.Start()
+    End Sub
+End Class
