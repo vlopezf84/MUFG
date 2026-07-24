@@ -1,3 +1,36 @@
+Con relación a la incidencia reportada sobre la visualización del reporte en Crystal Reports, comparto un resumen de las actividades realizadas y los resultados obtenidos.
+
+Desde el inicio del análisis se solicitó al usuario la ejecución de diversas pruebas para identificar si el problema estaba relacionado con el reporte, el código de la aplicación o el entorno de ejecución. Adicionalmente, se solicitó al área de Help Desk una recapitulación de las acciones realizadas sobre el equipo afectado, con el objetivo de descartar cambios de configuración o software que pudieran estar influyendo en el comportamiento.
+
+Como parte de la investigación, también se instaló la misma versión del Crystal Reports Runtime utilizada por el usuario en dos equipos de prueba con características similares, con la finalidad de intentar reproducir el comportamiento.
+
+Los resultados obtenidos fueron los siguientes:
+
+El mismo ejecutable y el mismo archivo .rpt funcionan correctamente en otros equipos.
+La versión del Crystal Reports Runtime es la misma en los equipos evaluados.
+El problema pudo reproducirse únicamente en uno de los equipos de prueba.
+Al exportar el reporte a PDF, el documento también se genera con el contenido cortado, lo que descarta que el problema esté relacionado únicamente con el visor (CrystalReportViewer) y confirma que el comportamiento se presenta desde el motor de generación de Crystal Reports.
+Se compararon distintas configuraciones del sistema (impresora predeterminada, controlador de impresión, tamaño de papel y orientación), sin encontrar una diferencia concluyente que explicara el comportamiento.
+
+Durante las pruebas se identificó que, al establecer explícitamente el tamaño y la orientación del papel antes de mostrar el reporte:
+
+cr.PrintOptions.PaperOrientation = CrystalDecisions.Shared.PaperOrientation.Portrait
+cr.PrintOptions.PaperSize = CrystalDecisions.Shared.PaperSize.PaperLetter
+
+el reporte se genera correctamente, incluso en el equipo donde se reproduce la incidencia.
+
+Con base en las evidencias obtenidas, la conclusión es que el problema no está asociado a la lógica de negocio de la aplicación, sino a la forma en que el motor de Crystal Reports interpreta la configuración de impresión del entorno en determinados equipos. Al definir explícitamente el tamaño y la orientación del papel, se evita depender de esa configuración externa y se obtiene un comportamiento consistente en todos los ambientes.
+
+Se adjuntan las evidencias de las pruebas realizadas, así como las comparativas entre los equipos utilizados durante la investigación.
+
+Quedo atento a cualquier comentario.
+
+Saludos.
+
+
+
+
+
 Imports CrystalDecisions.Shared
 Imports CrystalDecisions.CrystalReports.Engine
 Imports FrameWork
