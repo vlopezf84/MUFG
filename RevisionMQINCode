@@ -1,0 +1,936 @@
+using AplicacionSwfINMQ.Enums;
+using AplicacionSwfINMQ.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Conexiones;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Data;
+using System.Runtime.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
+using IOperacionServicio = AplicacionSwfINMQ.Interfaces.IOperacionServicio;
+
+namespace AplicacionSwfINMQ
+{
+    /// <summary>
+    /// Clase principal para ejecutar procedimientos.
+    /// </summary>
+    public class OperacionServicio : IOperacionServicio
+    {
+        private readonly Configuracion _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IAlertas _alertas;
+        private readonly IParametrizacion _parametrizacion;
+        private readonly IRepositorioTomi _repositorioTomi;
+
+        /// <summary>
+        /// Constructor principal de operaciones.
+        /// </summary>
+        /// <param name="configuracion"></param>
+        /// <param name="controlServicio"></param>
+        /// <param name="alertas"></param>
+        /// <param name="parametrizacion"></param>
+        /// <param name="repositorioTomi"></param>
+        public OperacionServicio(Configuracion configuracion, IControlServicio controlServicio, IAlertas alertas, IParametrizacion parametrizacion, IRepositorioTomi repositorioTomi)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _alertas = alertas;
+            _parametrizacion = parametrizacion;
+            _repositorioTomi = repositorioTomi;
+        }
+
+        /// <summary>
+        /// Método principal de ejecución de procedimientos.
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> EjecutarProcedimientosAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Marca la ejecución del servicio...
+                var resultadoEjecucion = await _controlServicio.ActualizaEJecucion(_configuracion.NombreServicio, ct);
+
+                if (resultadoEjecucion == null || !resultadoEjecucion.Exito)
+                {
+                    Config.EscribirLog($"ERROR|ActualizaEJecucion no devolvio resultado.|No se pudo actualizar el inicio de la ejecución correctamente.");
+                    return false;
+                }
+                //Obtiene los parámetros del sistema...
+                _configuracion.FechaSistema = await _parametrizacion.ObtenerFechaSistemaAsync(ct);
+                _configuracion.EsDiaHabil = await _controlServicio.EsDiaHabil();
+                _configuracion.ParametrosSistema = await _parametrizacion.ObtenerParametrosSistemaAsync(ConstantesServicio.ParametrosSistema, ConstantesServicio.ParametroWsT24MwPassword, ct);
+
+                //Valida que sea día hábil...
+                if (!_configuracion.EsDiaHabil.Value)
+                {
+                    Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.MensajeEjecuta}|{ConstantesServicio.MensajeDiaInhabil}");
+                    await _alertas.InsertarAlerta(new AlertaDTO()
+                    {
+                        Folio = null,
+                        TipoOPeracion = null,
+                        Servicio = _configuracion.NombreServicio,
+                        ClaveAviso = ConstantesClaveAviso.Error,
+                        Descipcion = ConstantesServicio.MensajeDiaInhabil,
+                        PId = _configuracion.Pid.Value,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = new Exception(ConstantesServicio.MensajeDiaInhabil)
+                    });
+                    return false;
+                }
+                TimeSpan horaInicio = TimeSpan.Zero;
+                TimeSpan horaFin = TimeSpan.Zero;
+                DateTime fecha = new DateTime();
+
+
+                if (DateTime.TryParseExact(_configuracion.FechaSistema, "yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var result))
+                {
+                    fecha = result;
+                }
+
+                switch (fecha.DayOfWeek)
+                {
+                    case DayOfWeek.Monday:
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_LU_INI], out var Monday))
+                            horaInicio = Monday;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{Monday}.");
+
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_LU_FIN], out var MondayFin))
+                            horaFin = MondayFin;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{MondayFin}.");
+                        break;
+                    case DayOfWeek.Tuesday:
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_LU_INI], out var Tuesday))
+                            horaInicio = Tuesday;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{Tuesday}.");
+
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_LU_FIN], out var TuesdayFin))
+                            horaFin = TuesdayFin;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{TuesdayFin}.");
+                        break;                      
+                    case DayOfWeek.Wednesday:
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_MI_INI], out var Wednesday))
+                            horaInicio = Wednesday;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{Wednesday}.");
+
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_MI_FIN], out var WednesdayFin))
+                            horaFin = WednesdayFin;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{WednesdayFin}.");
+                        break;
+                    case DayOfWeek.Thursday:
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_JU_INI], out var Thursday))
+                            horaInicio = Thursday;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{Thursday}.");
+
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_JU_FIN], out var ThursdayFin))
+                            horaFin = ThursdayFin;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{ThursdayFin}.");
+                        break;
+                    case DayOfWeek.Friday:
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_VI_INI], out var Friday))
+                            horaInicio = Friday;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{Friday}.");
+
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_VI_FIN], out var FridayFin))
+                            horaFin = FridayFin;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{FridayFin}.");
+                        break;
+                    case DayOfWeek.Saturday:
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_SA_INI], out var Saturday))
+                            horaInicio = Saturday;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{Saturday}.");
+
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_MI_FIN], out var SaturdayFin))
+                            horaFin = SaturdayFin;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{SaturdayFin}.");
+                        break;
+                    case DayOfWeek.Sunday:
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_DO_INI], out var Sunday))
+                            horaInicio = Sunday;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{Sunday}.");
+
+                        if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_DO_FIN], out var SundayFin))
+                            horaFin = SundayFin;
+                        else
+                            Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{SundayFin}.");
+                        break;                              
+                }
+
+                if (horaInicio == TimeSpan.Zero && horaFin == TimeSpan.Zero)
+                {
+                    Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.MensajeEjecuta}|{ConstantesServicio.MensajeErrorFechaRecuperada}");
+                    return false;
+                }
+
+                //Valida el horario de operación...
+                TimeSpan timeHoraSistema = _parametrizacion.ObtenerHoraSistema();
+
+                if (timeHoraSistema < horaInicio || timeHoraSistema > horaFin)
+                {
+                    Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.MensajeEjecuta}|{ConstantesServicio.MensajeFueraDeServicio}");
+                    await _alertas.InsertarAlerta(new AlertaDTO()
+                    {
+                        Folio = null,
+                        TipoOPeracion = null,
+                        Servicio = _configuracion.NombreServicio,
+                        ClaveAviso = ConstantesClaveAviso.Error,
+                        Descipcion = ConstantesServicio.MensajeFueraDeServicio,
+                        PId = _configuracion.Pid.Value,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = new Exception($"El servicio '{_configuracion.NombreServicio}' está fuera de horario.")
+                    });
+                    return false;
+                }
+
+                //Recupera los datos de procesamiento...
+                var respuesta = await _repositorioTomi.ObtieneLecturaMensajesMQ();
+                if (respuesta)
+                    Config.EscribirLog(ConstantesServicio.MensajeEjecutoCorrectamente);
+
+                //Marca el termino del servicio...
+                await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct);
+
+                return respuesta;
+
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.MensajeEjecuta}|Se presenta exception: {ex}");
+                await _alertas.InsertarAlerta(new AlertaDTO()
+                {
+                    Folio = null,
+                    TipoOPeracion = null,
+                    Servicio = _configuracion.NombreServicio,
+                    ClaveAviso = ConstantesClaveAviso.Critico,
+                    Descipcion = null,
+                    PId = _configuracion.Pid.Value,
+                    NombreProceso = _configuracion.NombreProceso,
+                    Exception = ex
+                });
+            }
+            return false;
+        }
+
+    }
+}
+
+***********************************
+using static MUFG_T24.Modelos.CalypsoMwRespuesta;
+
+namespace AplicacionSwfINMQ.Enums
+{
+    /// <summary>
+    /// Clase que se utiliza para colocar constantes de manera parametrizada.
+    /// </summary>
+    public class ConstantesServicio
+    {
+        //Constantes de parametrización...
+        public const string ParametrosSistema = "'HORA_OP_SWF_LU_INI','HORA_OP_SWF_LU_FIN','HORA_OP_SWF_MA_INI','HORA_OP_SWF_MA_FIN','HORA_OP_SWF_MI_INI','HORA_OP_SWF_MI_FIN','HORA_OP_SWF_JU_INI','HORA_OP_SWF_JU_FIN','HORA_OP_SWF_VI_INI','HORA_OP_SWF_VI_FIN','HORA_OP_SWF_SA_INI','HORA_OP_SWF_SA_FIN','HORA_OP_SWF_DO_INI','HORA_OP_SWF_DO_FIN','MQ.SWF_IN.MANAGER_NAME','MQ.SWF_IN.HOST','MQ.SWF_IN.PORT','MQ.SWF_IN.CHANNEL','MQ.SWF_IN.QUEUE_NAME','MAIL_PSG','MQ.SWF_IN.USER_ID'";
+         
+        public const string ParametroWsT24MwPassword = "'MQ.SWF_IN.PASSWORD','MQ.SWF_IN.SSL_CIPHERSPEC','MQ.SWF_IN.SSL_KEYREPOSITORY','MQ.SWF_IN.CERTIFICATE_LABEL'";
+
+        //Constantes de lógica...
+        public const string TipoOperacion = "SWIFT_IN";
+        public const string Servicio = "SWF_IN_MQ";
+
+        //Constantes de SQL...
+        public const string uspInsertaMensajeMQ = "usp_swf_insert_mq_msg";
+        public const int MaxSpTimeout = 10;
+        public const int WaitInterval = 5000;
+
+        //Constantes de Emeal...        
+        public const string NombreOrigen = "CMS Servicios";
+        public const string Para = "MAIL_TO";
+        public const string Asunto = "Error en MQ SWIFT_IN";
+        public const string AsuntoTest = "MAIL_SUBJECT";
+        public const string Mensaje = "ERROR durante la lectura del MQ del Swift_IN para el mensaje= ";
+        public const string SenderTest = "MAIL_SENDER_TEST";
+
+        //Constantes de configuracion de MQ...
+        public const string MANAGER_NAME = "MQ.SWF_IN.MANAGER_NAME";
+        public const string CHANNEL = "MQ.SWF_IN.CHANNEL";
+        public const string QUEUE_NAME = "MQ.SWF_IN.QUEUE_NAME";
+        public const string HOST = "MQ.SWF_IN.HOST";
+        public const string PORT = "MQ.SWF_IN.PORT";
+        public const string USER_ID = "MQ.SWF_IN.USER_ID";
+        public const string PASSWORD = "MQ.SWF_IN.PASSWORD";
+        public const string SSL_CIPHERSPEC = "MQ.SWF_IN.SSL_CIPHERSPEC";
+        public const string SSL_KEYREPOSITORY = "MQ.SWF_IN.SSL_KEYREPOSITORY";
+        public const string CERTIFICATE_LABEL = "MQ.SWF_IN.CERTIFICATE_LABEL";
+        public const string CORREO_PARA_DEFAULT = "MAIL_PSG";
+
+        //Constantes Horario
+        public const string HORA_OP_SWF_LU_INI = "HORA_OP_SWF_LU_INI";
+        public const string HORA_OP_SWF_LU_FIN = "HORA_OP_SWF_LU_FIN";
+        public const string HORA_OP_SWF_MA_INI = "HORA_OP_SWF_MA_INI";
+        public const string HORA_OP_SWF_MA_FIN = "HORA_OP_SWF_MA_FIN";
+        public const string HORA_OP_SWF_MI_INI = "HORA_OP_SWF_MI_INI";
+        public const string HORA_OP_SWF_MI_FIN = "HORA_OP_SWF_MI_FIN";
+        public const string HORA_OP_SWF_JU_INI = "HORA_OP_SWF_JU_INI";
+        public const string HORA_OP_SWF_JU_FIN = "HORA_OP_SWF_JU_FIN";
+        public const string HORA_OP_SWF_VI_INI = "HORA_OP_SWF_VI_INI";
+        public const string HORA_OP_SWF_VI_FIN = "HORA_OP_SWF_VI_FIN";
+        public const string HORA_OP_SWF_SA_INI = "HORA_OP_SWF_SA_INI";
+        public const string HORA_OP_SWF_SA_FIN = "HORA_OP_SWF_SA_FIN";
+        public const string HORA_OP_SWF_DO_INI = "HORA_OP_SWF_DO_INI";
+        public const string HORA_OP_SWF_DO_FIN = "HORA_OP_SWF_DO_FIN";
+
+        //Constantes de mensajes de Error...
+        public const string Application = "Application";
+        public const string MensajeErrorGeneral = "INFO|OnStart|Último fallback: no hacer nada.";
+        public const string MensajeErrorConfiguracion = "INFO|OnStart|Leyendo archivo de configuración.";
+        public const string MensajeTerminacion = "INFO|OnStop|Finalizando Servicio.";
+        public const string MensajeTerminacionExitosa = "INFO|OnStop|Terminación exitosa de bases de datos.";
+        public const string MensajeOperationCanceledException = "ERROR|TerminacionAsync|OperationCanceledException|";
+        public const string MensajeException = "ERROR|TerminacionAsync";
+        public const string MensajeOmitido = "INFO|OnStop|Terminación omitida por inicialización incompleta.";
+
+        public const string MensajeTimer = "ERROR|Realiza_timer|Se presenta exception: ";
+        public const string MensajeParametrizaciones = "ERROR|ParametrizacionesAsync";
+        public const string MensajeError = "ERROR";
+        public const string MensajeOnStart = "OnStart";
+        public const string MensajeElapsed = "ERROR|Elapsed";
+        public const string ErrorHora = "Ocurrio un error al convertir hora";
+        public const string MensajeDiaInhabil = "Hoy es un día inhábil.";
+        public const string MensajeEjecuta = "Ejecuta_Procedimientos";
+        public const string MensajeFueraDeServicio = "El servicio está fuera de horario";
+        public const string MensajeEjecutoCorrectamente = "El servicio SIWFT_IN_MQ se ejecuto correctamente.";
+
+        public const string CERTICATELABEL = "CertificateLabel";
+        public const string LEERMENSAJES = "INFO|Lee_mensajes_MQ|Datos para establecer la conexion.";
+        public const string MensajeConexionExitosa = "Conexión exitosa a IBM MQ";
+        public const string MensajeConexiónFallida = "Conexión fallida (IsConnected=false)";
+        public const string MensajeFormato = "INFO|Lee_mensajes_MQ|Formato del mensaje:";
+        public const string MensajeGET = "INFO|Lee_mensajes_MQ| GET: *";
+        public const string MensajeNohayICN = "INFO|Lee_mensajes_MQ|No hay ICN de regreso (mensaje o dato inválido en la cola).";
+        public const string MensajeRecuperado = "INFO|Lee_mensajes_MQ|ICN recuperado correctamente, ICN: ";
+        public const string MensajeERRORMQException = "ERROR|Lee_mensajes_MQ|MQ Exception:";
+        public const string MensajeMQRC_NO_MSG_AVAILABLE = "Terminación normal|MQRC_NO_MSG_AVAILABLE";
+        public const string MensajeMQQueue = "INFO|Lee_mensajes_MQ|MQQueue::termino con * ";
+
+        public const string MensajeERRORSWIFT_IN = "ERROR|Lee_mensajes_MQ|Error en MQ SWIFT_IN";
+        public const string MensajeLectura = "ERROR durante la lectura del MQ del Swift_IN para el mensaje= ";
+        public const string MensajeSPName = "EXEC usp_swf_insert_mq_msg MQ 'SWIFT_IN', '";
+        public const string MensajeErrorColaMQ = "Error al cerrar cola MQ";
+        public const string MensajeErrorDescMQ = "Error al deesconectar MQ";
+        public const string MensajeErrorIcn = "Error: no se recuperó valor Icn.";
+        public const string MensajeInsertaMensajeMQ = "INFO|InsertaMensajeMQ|Se insertó correctamente el mensaje , con el ICN: ";
+        public const string MensajeLecturaMensajesMQ = "INFO|ObtieneLecturaMensajesMQ|Clave de parametro de configuración Faltante.|No se recupera de BD:";
+        public const string MensajeErrorFechaRecuperada = "La fecha Inicio y/o Fin no fue recuperada correctamente.";
+
+
+        //Catálogo de mensajes MQ.
+        public const string Codigo2033 = "MQRC_NO_MSG_AVAILABLE: No hay mensajes disponibles en la cola.";
+        public const string Codigo2035 = "MQRC_NOT_AUTHORIZED: El usuario no tiene permisos para esta operación.";
+        public const string Codigo2009 = "MQRC_CONNECTION_BROKEN: La conexión al Queue Manager se perdió.";
+        public const string Codigo2059 = "MQRC_Q_MGR_NOT_AVAILABLE: El Queue Manager no está disponible.";
+        public const string Codigo2085 = "MQRC_UNKNOWN_OBJECT_NAME: El objeto (cola/canal) no existe.";
+        public const string Codigo2063 = "MQRC_SECURITY_ERROR: Error de seguridad en la conexión.";
+        public const string Codigo2381 = "MQRC_KEY_REPOSITORY_ERROR: Problema con el repositorio de claves (SSL/TLS).";
+        public const string Codigo2393 = "MQRC_SSL_INITIALIZATION_ERROR: Error al inicializar SSL.";
+        public const string Codigo2400 = "MQRC_UNSUPPORTED_CIPHER_SUITE: CipherSuite no soportado.";
+        public const string Codigo2538 = "MQRC_HOST_NOT_AVAILABLE: Host remoto no accesible.";
+        public const string Codigo2540 = "MQRC_CHANNEL_NOT_AVAILABLE: Canal no disponible.";
+        public const string CodigoDefault = "Error MQ desconocido. Código:";
+        public const string MensajeErrorEnvioCorreo = "Ocurrio un error en el envio de correo.";
+
+
+    }
+}
+
+**********************
+
+using System.Threading.Tasks;
+
+namespace AplicacionSwfINMQ.Interfaces
+{
+    /// <summary>
+    /// Interfaz para implementar métodos de consulta a la BD InterfacesT24
+    /// </summary>
+    public interface IRepositorioTomi
+    {
+        /// <summary>
+        /// Recupera mensajes de MQ.
+        /// </summary>
+        /// <returns></returns>      
+        Task<bool> ObtieneLecturaMensajesMQ();
+
+        /// <summary>
+        /// Método para insertar mensajes en la tabla de trabajo MQ MX.
+        /// </summary>
+        /// <param name="mensaje"></param>
+        /// <returns></returns>
+        Task<string> InsertaMensajeMQ(string mensaje);
+    }
+
+}
+
+***********
+
+using AplicacionSwfINMQ.Enums;
+using AplicacionSwfINMQ.Interfaces;
+using AplicacionSwfINMQ.Modelos;
+using IBM.WMQ;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace InfraestructuraSwfINMQ.Repositorio
+{
+    /// <summary>
+    /// Repositorio InterfacesT24 (TOMI) y VistasT24
+    /// </summary>
+    public class RepositorioTomi : RepositorioMaestro, IRepositorioTomi
+    {
+        private readonly Configuracion _configuracion;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public RepositorioTomi(Configuracion configuracion) : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        {
+            _configuracion = configuracion;
+        }
+
+
+        /// <summary>
+        /// Recupera lista de mensajes MQ
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ObtieneLecturaMensajesMQ()
+        {
+            MQQueue mqQueue = null;
+            MQQueueManager queueManager = null;
+            MQGetMessageOptions mqGetMessageOptions;
+            ConfiguracionMQ configMQ = new ConfiguracionMQ();
+            bool isContinue = true;
+            string mensaje = string.Empty;
+            bool respuesta = false;
+
+
+            configMQ.QueueManagerName = ObtenerParametro(ConstantesServicio.MANAGER_NAME);
+            configMQ.ChannelName = ObtenerParametro(ConstantesServicio.CHANNEL);
+            configMQ.QueueName = ObtenerParametro(ConstantesServicio.QUEUE_NAME);
+            configMQ.Host = ObtenerParametro(ConstantesServicio.HOST);
+            configMQ.Port = ObtenerEnteroObligatorio(ConstantesServicio.PORT);
+            configMQ.User = ObtenerParametro(ConstantesServicio.USER_ID);
+            configMQ.Password = ObtenerParametro(ConstantesServicio.PASSWORD);
+            configMQ.Ssl = ObtenerParametro(ConstantesServicio.SSL_CIPHERSPEC);
+            configMQ.SslPath = ObtenerParametro(ConstantesServicio.SSL_KEYREPOSITORY);
+            configMQ.Cert = ObtenerParametro(ConstantesServicio.CERTIFICATE_LABEL);
+            configMQ.MailTo = ObtenerParametro(ConstantesServicio.CORREO_PARA_DEFAULT);
+
+            try
+            {
+                MQEnvironment.UserId = configMQ.User;
+                MQEnvironment.Password = configMQ.Password;
+                MQEnvironment.SSLCipherSpec = configMQ.Ssl;
+                MQEnvironment.SSLKeyRepository = configMQ.SslPath;
+
+                Hashtable connectionProperties = new Hashtable();
+                connectionProperties.Add(MQC.HOST_NAME_PROPERTY, configMQ.Host);
+                connectionProperties.Add(MQC.PORT_PROPERTY, configMQ.Port);
+                connectionProperties.Add(MQC.CHANNEL_PROPERTY, configMQ.ChannelName);
+                connectionProperties.Add(ConstantesServicio.CERTICATELABEL, configMQ.Cert);
+
+                Config.EscribirLog(ConstantesServicio.LEERMENSAJES);
+                queueManager = new MQQueueManager(configMQ.QueueManagerName, connectionProperties);
+
+                mqQueue = queueManager.AccessQueue(configMQ.QueueName, MQC.MQOO_OUTPUT + MQC.MQOO_INPUT_SHARED + MQC.MQOO_INQUIRE);
+
+                if (queueManager.IsConnected)
+                {
+                    Config.EscribirLog(ConstantesServicio.MensajeConexionExitosa);
+                }
+                else
+                {
+                    Config.EscribirLog(ConstantesServicio.MensajeConexiónFallida);
+                }
+
+                // Leer todos los mensajes disponibles en este ciclo
+                while (isContinue)
+                {
+                    MQMessage message = new MQMessage();
+                    mqGetMessageOptions = new MQGetMessageOptions();
+                    mqGetMessageOptions.WaitInterval = ConstantesServicio.WaitInterval;
+                    mqGetMessageOptions.Options += MQC.MQGMO_WAIT;
+                    try
+                    {
+                        mqQueue.Get(message, mqGetMessageOptions);
+                        Config.EscribirLog(ConstantesServicio.MensajeFormato + message.Format);
+
+                        mensaje = message.ReadString(message.MessageLength);
+                        Config.EscribirLog(ConstantesServicio.MensajeGET + mensaje + "*");
+
+                        var IdICN = await InsertaMensajeMQ(mensaje);
+                        if (string.IsNullOrEmpty(IdICN))
+                        {
+                            Config.EscribirLog(ConstantesServicio.MensajeNohayICN);
+                            respuesta = false;
+                            throw new InvalidOperationException(ConstantesServicio.MensajeNohayICN);
+                        }
+                        else
+                        {
+                            Config.EscribirLog(ConstantesServicio.MensajeRecuperado + IdICN);
+                            respuesta = true;
+                        }
+
+                    }
+                    catch (MQException ex)
+                    {
+                        string errorMsg = MQErrorHandler.GetMQErrorDescription(ex.ReasonCode);
+                        Config.EscribirLog(ConstantesServicio.MensajeERRORMQException + errorMsg);
+
+                        if (ex.ReasonCode == MQC.MQRC_NO_MSG_AVAILABLE)
+                        {
+                            Config.EscribirLog(ConstantesServicio.MensajeMQRC_NO_MSG_AVAILABLE);
+                            isContinue = false;
+                        }
+                        else
+                        {
+                            Config.EscribirLog(ConstantesServicio.MensajeMQQueue + ex.Message.ToString() + "*");
+                            if (ex.Reason == MQC.MQRC_TRUNCATED_MSG_FAILED)
+                            {
+                                isContinue = false;
+                            }
+                        }
+                        break;
+                    }
+                }
+
+            }
+            catch (MQException ex)
+            {
+                string errorMsg = MQErrorHandler.GetMQErrorDescription(ex.ReasonCode);
+                Config.EscribirLog(ConstantesServicio.MensajeERRORMQException + errorMsg);
+            }
+            catch (Exception exc)
+            {
+
+                Config.EscribirLog($"{ConstantesServicio.MensajeERRORSWIFT_IN}| {ConstantesServicio.MensajeLectura} + mensaje + {ConstantesClaveAviso.Error}=  + {exc.Message}");
+                Config.EscribirLog($"{ConstantesServicio.MensajeSPName}, '" + mensaje + "'");
+
+                var destinatario = ObtenerValorConfig(_configuracion.CorreoParaDefault, configMQ.MailTo);
+                var asunto = string.IsNullOrEmpty(_configuracion.SujetoDefault)
+               ? ConstantesServicio.Asunto
+               : $"{ConstantesServicio.Asunto}[{_configuracion.SujetoDefault}]";
+
+                var resultado = await CorreoHelper.EnviarCorreoAsync(new MensajeCorreo()
+                {
+                    CorreoOrigen = _configuracion.CorreoSenderTest,
+                    NombreOrigen = ConstantesServicio.NombreOrigen,
+                    Para = destinatario,
+                    ConCopia = string.Empty,
+                    CopiaOculta = null,
+                    Asunto = asunto,
+                    Mensaje = ConstantesServicio.Mensaje + mensaje + ConstantesClaveAviso.Error + "= " + exc.Message.ToString()
+                });
+                if (!resultado)
+                {
+                    Config.EscribirLog(ConstantesServicio.MensajeErrorEnvioCorreo);
+                }
+            }
+            finally
+            {
+                try
+                {
+                    mqQueue?.Close();
+                }
+                catch (Exception ex)
+                {
+                    Config.EscribirLog($"{ConstantesServicio.MensajeErrorColaMQ}: {ex.Message}");
+                }
+
+                try
+                {
+                    queueManager?.Disconnect();
+                }
+                catch (Exception ex)
+                {
+                    Config.EscribirLog($"{ConstantesServicio.MensajeErrorDescMQ}: {ex.Message}");
+                }
+            }
+            return respuesta;
+        }
+
+        /// <summary>
+        /// Obtiene y valida un parametro de configuración obligatorio de tipo entero.
+        /// </summary>
+        /// <param name="clave"></param>
+        /// <returns></returns>
+        /// <exception cref="ConfigurationErrorsException"></exception>
+        private int ObtenerEnteroObligatorio(string clave)
+        {
+            string valor = ObtenerParametro(clave);
+            if (!int.TryParse(valor, out int resultado))
+            {
+                throw new ConfigurationErrorsException($"La configuración [{clave}] es obligatoria y debe de ser númerica.");
+            }
+            return resultado;
+        }
+
+
+        /// <summary>
+        /// Método para insertar mensajes obtenidos de servidor MQ y guardarlos en BD [InterfacesT24].
+        /// </summary>
+        /// <param name="mensaje"></param>
+        /// <returns></returns>
+        /// <exception cref="InvalidOperationException"></exception>
+        public async Task<string> InsertaMensajeMQ(string mensaje)
+        {
+            try
+            {
+                var resultado = await EjecutarStoredProcedureQuery<IcnMQ>(ConstantesServicio.uspInsertaMensajeMQ, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipo_operacion", ConstantesServicio.TipoOperacion));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@mq_msg", mensaje));
+                });
+                var icn = resultado?.Data?.FirstOrDefault()?.Icn;
+                if (string.IsNullOrWhiteSpace(icn.ToString()))
+                {
+                    Config.EscribirLog(ConstantesServicio.MensajeErrorIcn, NombreServicio.Swf_IN_MQ.ToString());
+                    throw new InvalidOperationException(ConstantesServicio.MensajeErrorIcn);
+                }
+                else
+                {
+                    Config.EscribirLog(ConstantesServicio.MensajeInsertaMensajeMQ + icn.ToString());
+                }
+
+                return icn?.ToString() ?? string.Empty;
+            }
+            catch (Exception ex)
+            {
+                var mensajeError = $"{ConstantesClaveAviso.Error}|Ocurrió un error al Insertar Mensaje MQ: {ex}";
+                    Config.EscribirLog(mensajeError);
+                throw new InvalidOperationException(mensajeError);
+            }
+        }
+
+        /// <summary>
+        /// Método para obtener valor de parametro
+        /// </summary>
+        /// <param name="valorConfig"></param>
+        /// <param name="valorDefault"></param>
+        /// <returns></returns>
+        string ObtenerValorConfig(string valorConfig, string valorDefault)
+        {
+            return string.IsNullOrEmpty(valorConfig) ? valorDefault : valorConfig;
+        }
+
+        /// <summary>
+        /// Método para obtener valor de parametro validando que no venga vacio.
+        /// </summary>
+        /// <param name="key"></param>
+        /// <returns></returns>
+        private string ObtenerParametro(string key)
+        {
+            if (_configuracion.ParametrosSistema.TryGetValue(key, out var value))
+                return value;
+
+            var mensaje = $"{ConstantesServicio.MensajeLecturaMensajesMQ}: {key}";
+            Config.EscribirLog(mensaje);
+            throw new ConfigurationErrorsException($"{mensaje}: {key}");            
+        }
+    }
+}
+**************************
+using AplicacionSwfINMQ.Enums;
+using System;
+
+public class MQErrorHandler
+{
+    /// <summary>
+    /// Catálogo de mensajes detallados, relacionados con los codigos de error del servidor MQ.
+    /// </summary>
+    /// <param name="reasonCode"></param>
+    /// <returns></returns>
+    public static string GetMQErrorDescription(int reasonCode)
+    {
+        switch (reasonCode)
+        {
+            case 2033:
+                return ConstantesServicio.Codigo2033;
+
+            case 2035:
+                return ConstantesServicio.Codigo2035;
+
+            case 2009:
+                return ConstantesServicio.Codigo2009;
+
+            case 2059:
+                return ConstantesServicio.Codigo2059;
+
+            case 2085:
+                return ConstantesServicio.Codigo2085;
+
+            case 2063:
+                return ConstantesServicio.Codigo2063;
+
+            case 2381:
+                return ConstantesServicio.Codigo2381;
+
+            case 2393:
+                return ConstantesServicio.Codigo2393;
+
+            case 2400:
+                return ConstantesServicio.Codigo2400;
+
+            case 2538:
+                return ConstantesServicio.Codigo2538;
+
+            case 2540:
+                return ConstantesServicio.Codigo2540;
+
+            default:
+                return $"{ConstantesServicio.CodigoDefault} {reasonCode}";
+        }
+    }
+}
+
+***********************
+using AplicacionSwfINMQ.Enums;
+using AplicacionSwfINMQ.Interfaces;
+using InfraestructuraSwfINMQ.Repositorio;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Encriptacion;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Logeo_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace SwfINMQ
+{
+    /// <summary>
+    /// Clase principal del servicio Windows (presentación).
+    /// </summary>
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        private Container _containerDI;
+        private Configuracion _configuracionBase;
+
+        protected override string NombreServicioLog => NombreServicio.Swf_IN_MQ.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 10000;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ServiceHost() { }
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del contenedor DI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+
+            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
+            _configuracionBase = new Configuracion();
+
+            //Inicializa la obtención de la configuración general y el logging...
+            {
+                ConfiguracionEncriptadaHelper.Inicializar();
+                ServicioConfiguracionSettings servicioMainConfiguracion = ConfiguracionEncriptadaHelper.ObtenerServicio(NombreServicio.Swf_IN_MQ.ToString());
+                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.PathLog = servicioMainConfiguracion.Log;
+                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+                _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
+                _configuracionBase.CorreoParaDefault = ConfiguracionEncriptadaHelper.ObtenerValorGeneral(ConstantesServicio.Para);
+                _configuracionBase.SujetoDefault = ConfiguracionEncriptadaHelper.ObtenerValorGeneral(ConstantesServicio.AsuntoTest);
+                _configuracionBase.CorreoSenderTest = ConfiguracionEncriptadaHelper.ObtenerValorGeneral(ConstantesServicio.SenderTest);
+
+                RutasConfiguracion rutas = new RutasConfiguracion()
+                {
+                    MUFG_Servicios_Path_Log = _configuracionBase.PathLog
+                };
+                Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+                Logging.Write(ConstantesServicio.MensajeErrorConfiguracion);
+            }
+
+            //Registra la configuracion...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
+
+            //Registra los componentes...
+            _containerDI.Register<AplicacionSwfINMQ.OperacionServicio>();
+            _containerDI.Register<IRepositorioTomi, RepositorioTomi>();
+            _containerDI.Verify();
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Obtiene el proceso actual...
+                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+                _configuracionBase = await _parametrizacion.ObtenerProcesoActualAsync(_configuracionBase, ct);
+
+                //Marca el servicio en uso...
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct);
+            }
+            catch (OperationCanceledException exc)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeParametrizaciones}|{exc}");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeParametrizaciones}|{ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>   
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Ejecuta el procedimiento principal del servicio...
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    var operacionServicio = _containerDI.GetInstance<AplicacionSwfINMQ.OperacionServicio>();
+                    await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeTimer}|{ex}");
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            Config.EscribirLog(ConstantesServicio.MensajeTerminacion);
+            IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+            try
+            {
+                if (_containerDI == null || _configuracionBase == null)
+                {
+                    Config.EscribirLog(ConstantesServicio.MensajeOmitido);
+                    return;
+                }
+
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {                   
+
+                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
+                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+
+                    //Marca el servicio en uso...
+                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    
+
+                    Config.EscribirLog(ConstantesServicio.MensajeTerminacionExitosa);
+                }
+            }
+            catch (OperationCanceledException exc)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeOperationCanceledException}|{exc}");
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"{ConstantesServicio.MensajeException}|{ex}");
+            }
+            finally
+            {
+                try
+                {
+                    //Marca el termino del servicio...
+                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Config.EscribirLog($"{ConstantesServicio.MensajeException}|{ex}");
+                }
+                finally { _containerDI?.Dispose(); }
+            }
+        }
+
+    }
+}
+*******************************
+USE [InterfacesT24]
+GO
+/****** Object:  StoredProcedure [dbo].[usp_SWF_INSERT_MQ_MSG]    Script Date: 10/20/2026 2:52:25 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+ALTER PROCEDURE [dbo].[usp_SWF_INSERT_MQ_MSG]
+ @tipo_operacion VARCHAR(10),   
+ @mq_msg TEXT
+
+AS
+BEGIN
+ DECLARE @header		VARCHAR(258)
+ DECLARE @txt_icn		VARCHAR(25)
+ DECLARE @num_regs		INT
+ SET @header		= CAST(@mq_msg AS VARCHAR(258))
+ SET @txt_icn		= REPLACE(RTRIM(LTRIM(SUBSTRING(@header, 1, 17))),' ','')  -- Por MQ el ICN es solo de 15 caracteres. 
+ IF @txt_icn<>'' BEGIN
+  SELECT @num_regs=COUNT(1) FROM TB_SRV_SWF_PLAN_TRABAJO_MAESTRO WHERE folio=@txt_icn AND tipo_operacion=@tipo_operacion;
+  IF @num_regs=0
+     INSERT INTO TB_SRV_SWF_PLAN_TRABAJO_MAESTRO (folio,cve_estatus,fec_inicio,tipo_operacion) VALUES (@txt_icn,'READ',getDate(),@tipo_operacion);
+  SELECT @num_regs=COUNT(1) FROM TB_SRV_SWF_TRABAJO WHERE NF_FOLIO=@txt_icn AND NF_TIPO = @tipo_operacion ;
+  IF @num_regs=0
+     INSERT INTO TB_SRV_SWF_TRABAJO (NF_FOLIO,NF_MQ_MSG,NF_FECHA_INICIO,NF_TIPO) VALUES (@txt_icn,@mq_msg,getDate(),@tipo_operacion);
+ END
+ SELECT @txt_icn
+END
