@@ -1,9 +1,0 @@
-ID	Prioridad	¿Se hace?	Explicación breve
-CS-1	Major	✅ Sí	Si el proceso falla, puede quedar permanentemente como “running” y una falla al insertar la alerta puede ocultar el error original. Es un riesgo operativo real en producción.
-CS-2	Major	✅ Sí	Se usa Pid.Value sin garantizar que exista. Una configuración incompleta puede provocar excepción durante startup o incluso al intentar reportar otra falla, ocultando la causa original.
-CS-3	Major	✅ Sí	Los horarios requeridos se leen y convierten sin validación completa. Una configuración inválida puede provocar excepciones en cada ejecución del timer, afectando directamente la operación del servicio.
-CS-4	Minor	❌ No	Las listas repetidas de servicios pueden generar mantenimiento inconsistente en el futuro, pero actualmente no se demuestra una falla de producción. Es refactorización.
-CS-5	Major	❌ No	La ruta absoluta a MUFG_T24.dll afecta reproducibilidad del build/CI, pero no representa por sí sola un fallo del servicio productivo actual si el ambiente ya tiene esa ruta.
-CS-6	Minor	❌ No	Separar composición, configuración y logging mejoraría arquitectura y testabilidad, pero no corrige un riesgo funcional actual.
-CS-7	Major	❌ No	Faltan pruebas de escenarios críticos, pero la ausencia de tests no modifica directamente el comportamiento productivo. Los tests sí deberían acompañar los fixes de CS-1/2/3, pero no lo tomaría como cambio productivo independiente.
-CS-8	Minor	❌ No	Es únicamente duplicación de setup en pruebas. Impacta mantenibilidad, no seguridad ni producción.
