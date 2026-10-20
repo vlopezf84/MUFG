@@ -1,0 +1,422 @@
+SwfINMQ Recommendations
+SwfINMQ - Architecture & Code Quality Recommendations
+Solution: SWIFT/Incoming/SWF_IN_MQ/SwfINMQ.slnx (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ.slnx) Reviewed source: branch CodeReview2, commit 516c97e3b9b515b58dedfc1ffe4e1a98f5888d38 (clean working tree) Compared against: LoansApp architecture and coding baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review/severity checklist (../BaseLine_Docs/code_review.md) See also: _ORCHESTRATION.md (_ORCHESTRATION.md) for the portfolio methodology, template, and standing findings.
+1. Solution Overview (low/no-dependency -> high dependency)
+Tier	Project	Kind	Path
+0	AplicacionSwfINMQ	.NET Framework 4.8 class library (SDK-style, x86)	AplicacionSwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/AplicacionSwfINMQ.csproj)
+1	InfraestructuraSwfINMQ	.NET Framework 4.8 class library (SDK-style, x86)	InfraestructuraSwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/InfraestructuraSwfINMQ.csproj)
+2	SwfINMQ	.NET Framework 4.8 Windows Service host (Exe, x86)	SwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/SwfINMQ.csproj)
+2	PruebasUnitarias	MSTest/Moq project (net48, classic csproj)	PruebasUnitarias.csproj (../../SWIFT/Incoming/SWF_IN_MQ/PruebasUnitarias/PruebasUnitarias.csproj)
+
+What this solution actually does: SwfINMQ is a timer-driven Windows Service that ingests inbound SWIFT messages from an IBM MQ queue into the TOMI (InterfacesT24) database. Each tick opens a SimpleInjector scope, marks the service as running, reloads 25 system parameters (per-weekday operating hours, MQ host/channel/queue/credential/TLS settings, the operations mailbox), and decides from the database business date plus the local clock whether the service is inside its operating window. Inside the window it connects to the queue manager over TLS, drains the queue with a 5-second wait Get, and passes each message to usp_SWF_INSERT_MQ_MSG. That procedure takes the first 17 characters as the ICN, creates the work-plan master row (READ) and the work row that stores the whole message when they do not already exist, and returns the ICN. An unexpected exception while reading or storing a message is logged and emailed (with the message text) to the operations mailbox and the cycle ends without rethrowing; failures outside the read loop (parameter loading, lifecycle updates, configuration) raise a CRITICO alert instead. The consumers of TB_SRV_SWF_PLAN_TRABAJO_MAESTRO / TB_SRV_SWF_TRABAJO are outside this repository, so downstream processing is inferred from the table names only.
+2. Scope & Methodology Note
+This is a new review after the authoritative reset dated 2026-10-07. No earlier SwfINMQ recommendation document exists in docs/recommendation/, and findings or severities from older audit runs were not used as evidence.
+• Read 24/24 Git-tracked files, 1,903/1,903 lines, in full and line by line: 14 C# files / 1,166 lines, four project files, the .slnx, App.config, two packages.config files, .gitattributes, and .gitignore. git status --ignored is clean, the physical tree contains exactly those 24 files outside .git, and the local Playground/ directory is an empty untracked shell (not scope). The solution is below the 150-file / 5,000-line threshold, so no on-disk progress tracker was required.
+• Directly relevant SQL was also read: the solution-specific procedure usp_SWF_INSERT_MQ_MSG (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Incoming/SWF_IN_MQ/IT24/Procedures/001%20SP%20%5Bdbo%5D.%5Busp_SWF_INSERT_MQ_MSG%5D.sql) (85/85 lines, UTF-16) and the bodies of the three shared lifecycle/alert procedures it relies on (execution start (../../StoredProcedures/MWD_DB/DBMDW/General/MUFG_T24_BTMUM_64/IT24/Procedures/001%20SP%20usp_ActualizaEjecucion_MUFGLibreria.sql), execution end (../../StoredProcedures/MWD_DB/DBMDW/General/MUFG_T24_BTMUM_64/IT24/Procedures/007%20SP%20usp_ActualizaTerminacion_HotScan.sql), alert insert (../../StoredProcedures/MWD_DB/DBMDW/General/MUFG_T24_BTMUM_64/IT24/Procedures/031%20SP%20usp_InsertaAlerta_MUFGLibreria.sql)).
+• Traced only the shared MUFG_T24 contracts that control effective behavior here: parameter loading, schedule/business-day checks, stored-procedure result handling, lifecycle updates, alerts, logging, and the WindowsServiceHostBase timer/shutdown contract. These external reads verify behavior; they are not counted as solution-owned files. Two IBM MQ documentation pages were consulted for syncpoint defaults and managed-client TLS options (cited where used).
+• Supplemented the full read with quantified scans: 14 duplicated TimeSpan.TryParse blocks, 49 Config.EscribirLog calls, 3 Pid.Value dereferences in the application layer, zero uses of the Tuesday (HORA_OP_SWF_MA_*) parameters, and no matches for weak cryptography, TLS-validation bypass, System.Random, file/process access, throw ex;, .Result, .Wait(, async void, or Task.Run.
+• Provenance: CodeReview2 and the CodeReview branch diverged from commit 01dfe84 (2026-08-27). The CodeReview branch (fd768e7, 58ed576) contains a different MQ implementation (see MQ-FR-8). The Phase 0 inventory (33 files / 20 C#) and Phase 1 scorecard (27 files / 17 C#) predate the current branch state, which has 24 files / 14 C#.
+• No JIRA/ADO work item or acceptance criteria was supplied. Business expectations are limited to behavior expressed by code, SQL, and the portfolio baseline.
+• Independent verification pass (2026-10-09): a second session re-read all 24 files / 1,903 lines at the same commit before consulting this report, then reconciled the two. All 20 findings and their line anchors were reproduced; the shared-contract claims (ActualizaEJecucion throws on failure, ActualizaTerminacion rethrows cancellation, the EsDiaHabil weekend gate, SQL exceptions returned as Exito = false under the default validarAfectacion = false) were re-checked against the MUFG_T24 source, and IBM's documented syncpoint default (none on Windows, implicit syncpoint at MQDISC) was re-confirmed for MQ-FR-8. One correction resulted (the reason-code classification in MQ-FR-10) and one cross-cutting row was added (GEN-11).
+• Production source was not modified. Build and test execution were unavailable: dotnet, msbuild, vstest.console, nuget, and vswhere are not installed (only legacy MSBuild 4.0 exists), the D: drive and D:\ServiceCMS\MUFG_T24.dll / amqmdnet.dll are absent, and no packages folder is restored. Validation is therefore static plus document/tooling checks. Both pinned SDK package versions (Newtonsoft.Json 13.0.4, System.Data.SqlClient 4.9.1) were confirmed to exist on NuGet.
+Finding Summary
+Category	Blocker	Major	Minor	Total
+MustChange/rewrite	3	10	0	13
+rewrite_recommended	0	2	3	5
+NiceToRewrite_ifTimePermits	0	0	2	2
+Total	3	12	5	20
+
+Fresh Cross-Cutting Checks
+Candidate	Result	Current evidence
+GEN-1 absolute DLL references	Yes	Five absolute D:\ServiceCMS references across all four projects: four MUFG_T24.dll plus one amqmdnet.dll; no nuget.config or MUFG_T24 package exists in the portfolio (MQ-FR-19).
+GEN-2 zero automated tests	Yes (effective)	A test project exists, but none of its three methods can execute or exercises production logic (MQ-FR-18).
+GEN-3 duplicate project files	No	Four distinct project files, one per folder.
+GEN-4 near-identical solutions	Lead only	The sibling SWF_IN_MQ_MX OperacionServicio.cs shares 195 of this file's 208 non-blank lines and has the same Tuesday/Saturday key defects (its lines 100, 105, 149). Confirm during that solution's own review; it was not reviewed here.
+GEN-5 sensitive logging	Yes	The complete SWIFT message is logged twice and emailed (MQ-FR-9). Credentials are not logged: the sensitive parameters are required and masked by the shared loader.
+GEN-6 undisposed signing helper	No	No signing helper or certificate object is constructed locally.
+GEN-7 finalization only on success	Yes	ActualizaEJecucion runs before validation; ActualizaTerminacion runs only on the final success path (MQ-FR-4).
+GEN-8 nullable PID dereference	No	Pid is always assigned from Process.GetCurrentProcess().Id and the base host rejects a PID <= 0 before the timer starts; every .Value use reads that validated value.
+GEN-9 discarded service-state results	Yes	Startup and shutdown await but ignore the Boolean from MarcarPuertoEnUsoAsync; ActualizaTerminacion and InsertarAlerta results are also ignored (MQ-FR-16).
+GEN-10 out-of-hours alert per tick	Yes	The non-business-day and out-of-window branches each log an ERROR and insert an alert row on every tick (MQ-FR-5).
+GEN-11 repository failure indistinguishable from empty/successful result	Related variant	InsertaMensajeMQ never reads Exito or MensajeError, so a SQL failure surfaces as a NullReferenceException that hides the cause; the cycle still fails and is emailed, so it is not silent (MQ-FR-12).
+
+Items Requiring Business/Integration Confirmation
+These are not classified as defects without the missing contract evidence:
+• Weekend ingestion. The code and four required parameters (HORA_OP_SWF_SA_*, HORA_OP_SWF_DO_*) define Saturday and Sunday windows, but the shared EsDiaHabil() returns false on every Saturday/Sunday unless the general setting FORZA_EJECUCION_SERVICIOS is 1. Confirm whether weekend ingestion is expected; if not, the weekend branches and parameters are dead (MQ-FR-2, MQ-FR-6).
+• Actual timer interval. TimerInterval comes from the encrypted service configuration; the host falls back to 10,000 ms when it is null. Per-tick alert, log, and MQ-connection volumes in this report use that default for illustration only.
+• Parameter conversion. The procedure declares @mq_msg TEXT while the shared CrearParametro sends a Unicode (nvarchar) value. Run one integration test against the target SQL Server to confirm the conversion succeeds and that non-ASCII message content is preserved (MQ-FR-14).
+• Same-ICN, different-payload policy. When the work row for an ICN and type already exists, the procedure ignores the new payload and still returns the ICN. Confirm whether a corrected/re-sent message with the same ICN must be rejected, versioned, or may be dropped (MQ-FR-14).
+• Queue-manager facts. Confirm the queue manager platform/version, that a get without MQGMO_SYNCPOINT is non-transactional against the target queue manager (one integration test), whether the service user may rely on a backout queue (BOQNAME/BOTHRESH), and whether the channel authority records require PUT/INQ on the queue (MQ-FR-8, MQ-FR-15).
+• Release line. Confirm which branch is intended for release: CodeReview (syncpoint-based reads, an MQ seam, and repository tests) or the current CodeReview2.
+External Dependency Notes (belong to the MUFG_Library review, not counted here)
+• Alertas.InsertarAlerta dereferences alerta.PId before its own alerta == null guard (Alertas.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Alertas/Alertas.cs#L103-L108)) and writes each alert's exception to the log twice, once ERROR-tagged (lines 137-141 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Alertas/Alertas.cs#L137-L141)).
+• ControlServicio.MarcarPuertoEnUsoConResultadoAsync rethrows with throw resultadoOperacion.Excepcion;, which resets the original stack trace (ControlServicio.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L145)).
+• Parametrizacion.ObtenerParametrosSistemaAsync logs every non-sensitive parameter value at INFO on each call (Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L253-L258)); with this solution's per-tick reload that is roughly 25 INFO lines per tick before any MQ work.
+• EsDiaHabil and ObtenerHoraSistema use the local clock (DateTime.Now) while ObtenerFechaSistemaAsync returns the database business date (RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1260) and Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L41-L44)); around midnight or business-date rollover the two can disagree.
+3. What's Already Good
+• Constructor injection and a verified composition root. OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L23-L37) receives every collaborator through its constructor, and ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L47-L86) registers them in SimpleInjector and calls Verify(). Configuracion is registered as a scoped clone (line 80 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L80)) and each tick opens its own scope (line 124 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L124)), so per-tick configuration changes never leak between ticks.
+• Database access is parameterized. RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L223-L227) calls a fixed stored-procedure name and binds @tipo_operacion and @mq_msg with CrearParametro; no SQL is built by concatenation anywhere in the solution.
+• Secrets stay out of the repository and out of the logs. The MQ password, cipher spec, key repository, and certificate label are requested as required sensitive parameters (ConstantesServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L13)); the shared loader throws when any is missing or blank and masks sensitive values in its INFO line (Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L241-L258)). App.config holds no secrets, and .gitignore excludes *.pfx, logs, bin/, obj/, and packages/.
+• MQ cleanup is independent and exception-safe. The finally block closes the queue and disconnects the queue manager in separate try/catch blocks (RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L173-L191)), so a failed Close() cannot skip Disconnect().
+• Overlap protection and bounded shutdown are inherited. WindowsServiceHostBase skips a tick while the previous one is running (line 372 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L372)) and bounds stop to 60 s wait plus 30 s cleanup. The host finalizes with a separate cleanupCt (ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L158)), the right pattern for work that must still run after cancellation.
+• Cancellation reaches the database calls that support it. ActualizaEJecucion, ObtenerFechaSistemaAsync, and ObtenerParametrosSistemaAsync all receive ct (OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L55-L65)).
+• Explicit invariant-culture date parsing and a single service identity. The business date is parsed with TryParseExact(..., "yyyyMMdd", InvariantCulture, ...) (line 89 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L89)), and NombreServicio.Swf_IN_MQ is used consistently by Program.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/Program.cs#L15), NombreServicioLog, and the configuration lookup (no host/service-name mismatch).
+• Failure paths keep the exception. Host rethrows use throw; (ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L104-L113)), and alerts carry the exception object. A readable MQ reason-code catalogue exists in MQErrorHandler.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Messaging/MQErrorHandler.cs#L11-L50).
+• SimpleInjector comes from NuGet in the host (SwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/SwfINMQ.csproj#L65-L67)) instead of a raw D: path, and test scaffolding (MSTest 2.2.10, Moq 4.20.72, project references to both production libraries) is already in place, which keeps the repair cost of MQ-FR-18 low.
+• Ruled out as defects (recorded to avoid re-investigation): _configuracion.EsDiaHabil.Value (OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L64-L68)) is safe because it is assigned from a non-nullable bool; the Pid.Value uses read the validated base configuration; the ParametrosSistema[...] indexers cannot miss because the shared loader throws on any missing or blank requested key; a blank cipher/key-repository cannot silently disable TLS for the same reason.
+4. Findings by Project (low/no-dependency -> high dependency)
+4.1 AplicacionSwfINMQ (Tier 0)
+MustChange / Rewrite
+MQ-FR-1 - Tuesday uses Monday's operating-window parameters
+• Category / severity: MustChange/rewrite - Major
+• Evidence: OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L107-L117); the unused Tuesday keys are requested at ConstantesServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L11) and declared at lines 48-49 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L48-L49)
+Code block (csharp)
+case DayOfWeek.Tuesday:
+    if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_LU_INI], out var Tuesday))
+        horaInicio = Tuesday;
+    ...
+    if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_LU_FIN], out var TuesdayFin))
+        horaFin = TuesdayFin;
+The Tuesday branch is a copy of the Monday branch that was never updated: both boundaries read HORA_OP_SWF_LU_*. HORA_OP_SWF_MA_INI and HORA_OP_SWF_MA_FIN are loaded from the database on every tick (and required by the shared loader) but are referenced nowhere else in the solution (0 uses). Tuesday is a business day, so this branch is reachable in normal operation. Whenever the configured Tuesday window differs from Monday's, the service opens and closes on the wrong schedule (late intake or intake outside the agreed hours); when the windows happen to be equal the defect is invisible until someone edits MA.
+Recommendation: read HORA_OP_SWF_MA_INI/HORA_OP_SWF_MA_FIN for Tuesday, and replace the seven copy-pasted cases with the table-driven mapping in MQ-FR-6 so that one test per weekday proves the mapping. Treat this as a Blocker if production MA and LU values differ.
+Benefit: the configured Tuesday window is honored and the defect cannot recur silently.
+MQ-FR-2 - Saturday closes using Wednesday's closing parameter
+• Category / severity: MustChange/rewrite - Major
+• Evidence: OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L151-L161); shared weekend gate at RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1245-L1262)
+Code block (csharp)
+case DayOfWeek.Saturday:
+    if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_SA_INI], out var Saturday))
+        horaInicio = Saturday;
+    ...
+    if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_MI_FIN], out var SaturdayFin))
+        horaFin = SaturdayFin;
+Saturday opens with SA_INI but closes with Wednesday's MI_FIN; HORA_OP_SWF_SA_FIN is required and loaded but never read. The branch is only reachable when the shared EsDiaHabil() returns true on a Saturday, which it does only when the general setting FORZA_EJECUCION_SERVICIOS is 1; otherwise OperacionServicio returns at the non-business-day check (line 68) before the schedule logic runs. The defect is therefore latent in the default configuration and live in forced mode. The same gate makes the Sunday branch unreachable unless forced (see the weekend question in Section 2).
+Recommendation: use HORA_OP_SWF_SA_FIN, covered by the same per-weekday test as MQ-FR-1. Decide with the business whether weekend ingestion is intended; if it is, the non-business-day gate must not block it, and if it is not, delete the weekend branches and parameters.
+Benefit: removes a wrong-closing-time defect and resolves the contradiction between the weekend parameters and the weekend gate.
+MQ-FR-3 - Schedule parse failures silently produce zero or partial windows and misleading diagnostics
+• Category / severity: MustChange/rewrite - Major
+• Evidence: OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L84-L92), failure logs such as lines 97-105 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L97-L105), and the zero test at lines 175-179 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L175-L179)
+Code block (csharp)
+DateTime fecha = new DateTime();
+if (DateTime.TryParseExact(_configuracion.FechaSistema, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var result))
+{
+    fecha = result;
+}
+switch (fecha.DayOfWeek) { ... }
+...
+if (TimeSpan.TryParse(_configuracion.ParametrosSistema[ConstantesServicio.HORA_OP_SWF_LU_INI], out var Monday))
+    horaInicio = Monday;
+else
+    Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.ErrorHora}:{Monday}.");
+...
+if (horaInicio == TimeSpan.Zero && horaFin == TimeSpan.Zero) { ... return false; }
+Four related defects share this block:
+1. new DateTime() is 0001-01-01, which is a Monday. If the business-date string ever fails to parse, the failure is ignored and Monday's window is applied with no error. Today this is masked because the shared ObtenerFechaSistemaAsync always formats a DateTime as yyyyMMdd (Parametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L146)); any change in that contract becomes a silent wrong-day schedule.
+2. On a failed TimeSpan.TryParse the code logs the out variable (Monday, MondayFin, ...), which is always 00:00:00 after a failure, instead of the configured text, so the log never identifies the bad value (14 sites).
+3. Only a failure of *both* boundaries is reported. If only the start fails it stays 00:00 and the window silently widens to midnight-to-end; if only the end fails it stays 00:00, every tick is "out of hours", and the alert says "fuera de horario" instead of naming the configuration error.
+4. The out-of-window test now < inicio || now > fin is true for every time of day when inicio > fin, so an overnight window can never be in effect: the service is always treated as out of hours, with no validation or message.
+Recommendation: fail the cycle explicitly with a Critical alert naming the key and the raw value when either boundary or the business date is invalid; parse with an explicit format; reject inicio >= fin unless overnight windows are deliberately supported; and check the TryParseExact result and fail explicitly for the business date (the shared ObtenerFechaSistemaValidadaAsync only rejects a null value, not a malformed one). These checks belong in the single parser proposed in MQ-FR-6.
+Benefit: configuration errors become visible, immediate, and attributable instead of silently shifting the processing window.
+MQ-FR-4 - Execution state is finalized only on the successful path (GEN-7)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: start mark at OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L55), early returns at lines 60, 82, 178, and 198 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L198), the only finalization at line 207 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L207), and the catch at lines 212-227 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L212-L227); procedure semantics in start (../../StoredProcedures/MWD_DB/DBMDW/General/MUFG_T24_BTMUM_64/IT24/Procedures/001%20SP%20usp_ActualizaEjecucion_MUFGLibreria.sql) (status = 1) and end (../../StoredProcedures/MWD_DB/DBMDW/General/MUFG_T24_BTMUM_64/IT24/Procedures/007%20SP%20usp_ActualizaTerminacion_HotScan.sql) (status = 0)
+Code block (csharp)
+var resultadoEjecucion = await _controlServicio.ActualizaEJecucion(_configuracion.NombreServicio, ct); // status = 1
+...                                                   // non-business day, bad schedule, off-hours: return false
+var respuesta = await _repositorioTomi.ObtieneLecturaMensajesMQ();
+await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct);                          // status = 0, success path only
+return respuesta;
+...
+catch (Exception ex) { ... await _alertas.InsertarAlerta(...); }                                         // no finalization
+Every tick writes tb_srv_controladoradeservicios.status = 1 before validating anything, but only the path that reaches line 207 writes status = 0. Non-business days, invalid schedules, off-hours ticks, and every exception leave the persisted state marked as running; the host adds a final ActualizaTerminacion only at service shutdown (ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L178)). Anything that reads that table (monitoring, controller services) therefore sees this service as "running" through nights and weekends and after failures. If the finalizer reused the already-cancelled ct it would also fail, because the shared method calls ct.ThrowIfCancellationRequested() and rethrows cancellation (RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1193-L1230)).
+Recommendation: wrap the tick in try/finally, compute an explicit outcome (Succeeded, Skipped, Failed, Cancelled), and call ActualizaTerminacion in the finally with a short independent token (the host's cleanupCt pattern), inspect its result (MQ-FR-16), and never let a finalizer failure replace the primary exception.
+Benefit: the persisted run state matches reality after skips, failures, and cancellation.
+MQ-FR-5 - Expected non-operating states raise an Error alert and ERROR logs on every tick (GEN-10)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L68-L83) and lines 184-199 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L184-L199); alert persistence in usp_InsertaAlerta_MUFGLibreria (../../StoredProcedures/MWD_DB/DBMDW/General/MUFG_T24_BTMUM_64/IT24/Procedures/031%20SP%20usp_InsertaAlerta_MUFGLibreria.sql) and the shared logging at Alertas.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Alertas/Alertas.cs#L137-L141)
+Code block (csharp)
+if (!_configuracion.EsDiaHabil.Value)
+{
+    Config.EscribirLog($"{ConstantesClaveAviso.Error}|{ConstantesServicio.MensajeEjecuta}|{ConstantesServicio.MensajeDiaInhabil}");
+    await _alertas.InsertarAlerta(new AlertaDTO() { ..., ClaveAviso = ConstantesClaveAviso.Error, ... Exception = new Exception(ConstantesServicio.MensajeDiaInhabil) });
+    return false;
+}
+A weekend, a holiday, and every tick outside the configured window are normal states, yet each one logs an ERROR line and inserts a row into alertas; the shared Alertas then writes the exception to the log twice more (one line ERROR-tagged, one untagged). At the 10-second default interval that is 8,640 alert rows and 17,280 ERROR lines (25,920 log lines) for each 24 hours spent outside the window (more than 17,000 alert rows over a weekend), unbounded table growth, and an error stream in which a genuine failure is invisible. The alert also carries a manufactured new Exception(...) that was never thrown.
+Recommendation: treat these states as Skipped with a single INFO line, and alert only on transitions or genuine anomalies (for example, messages waiting while the service believes it is outside its window, or a configuration error). Track "already alerted for this state" in the registered but unused EstadoHorarioOperacion singleton (ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L81)) or equivalent.
+Benefit: alerts regain meaning, the alert table and logs stop growing with idle time, and real failures stand out.
+Rewrite Recommended
+MQ-FR-6 - Replace the 14 duplicated schedule blocks with one tested, table-driven parser
+• Category / severity: rewrite_recommended - Major
+• Evidence: OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L94-L173); quantified scan: 14 TimeSpan.TryParse( blocks, 14 ParametrosSistema[...] indexer lookups, 14 near-identical failure logs
+Seven case branches repeat the same eleven-line parse/log/assign shape. The two incorrect key choices (MQ-FR-1 and MQ-FR-2) are direct products of this copy-paste: two of the seven weekday mappings are wrong, and no test would catch a third. The method also mixes the database business date (day of week) with the local operating-system clock (ObtenerHoraSistema() returns DateTime.Now.TimeOfDay), so the day and the time can disagree around midnight.
+Recommendation: extract a pure HorarioOperacion type in the application layer:
+Code block (csharp)
+private static readonly Dictionary<DayOfWeek, string[]> ClavesPorDia = new Dictionary<DayOfWeek, string[]>
+{
+    { DayOfWeek.Monday,  new[] { ConstantesServicio.HORA_OP_SWF_LU_INI, ConstantesServicio.HORA_OP_SWF_LU_FIN } },
+    { DayOfWeek.Tuesday, new[] { ConstantesServicio.HORA_OP_SWF_MA_INI, ConstantesServicio.HORA_OP_SWF_MA_FIN } },
+    // Wednesday .. Sunday likewise
+};
+ 
+// returns false and an error naming the key/raw value instead of defaulting to 00:00
+bool TryObtenerHorario(DateTime fecha, IReadOnlyDictionary<string, string> parametros, out TimeSpan inicio, out TimeSpan fin, out string error);
+Call it once, branch on the result (Skipped, ConfigurationError, InWindow), and cover all seven days, invalid values, and boundary times with unit tests.
+Benefit: removes about 80 lines of duplication, fixes MQ-FR-1/2/3 in one change, and makes the weekend/overnight decisions explicit and testable.
+Nice to Rewrite if Time Permits
+MQ-FR-7 - Remove constant, naming, and dead-code noise across the solution
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: ConstantesServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs), OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs), MQErrorHandler.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Messaging/MQErrorHandler.cs), IRepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Interfaces/IRepositorioTomi.cs)
+• ConstantesServicio.cs: using static MUFG_T24.Modelos.CalypsoMwRespuesta; on line 1 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L1) imports a Calypso type that is never used here; MaxSpTimeout (line 21 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L21)) has no reference, so the insert runs with the default command timeout; Mensaje (line 29 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L29)) and MensajeLectura (line 95 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L95)) are the same text; MensajeSPName (line 96 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L96)) is a fake "EXEC ..." string used only to log a payload (MQ-FR-9); MensajeLecturaMensajesMQ (line 101 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L101)) begins with INFO| but is used as a configuration-error message, so the shared logger records that error at INFO.
+• Typos in user-visible text: "Emeal" (line 24 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L24)), "SIWFT_IN_MQ" (line 80 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L80)), CERTICATELABEL (line 82 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L82)), "deesconectar" (line 98 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L98)).
+• OperacionServicio.cs imports System.Data and System.Runtime.Serialization without using them (lines 10-11 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L10-L11)); its ActualizaEJecucion result check (lines 57-61 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L57-L61)) tests !Exito, which the shared method never returns because it throws instead (RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1173)); the Critical alert passes Descipcion = null (line 221 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L221)).
+• IcnMQ.cs has five unused usings; Program.cs has three; the IRepositorioTomi summary says "tabla de trabajo MQ MX" (line 17 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Interfaces/IRepositorioTomi.cs#L17)) although this is the non-MX solution (sibling copy residue).
+• MQErrorHandler (MQErrorHandler.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Messaging/MQErrorHandler.cs#L4-L49)) is a non-static class in the global namespace with literal reason codes instead of MQC.MQRC_* constants (one literal is already mislabeled, see MQ-FR-10 item 5); using System; is unused.
+• RepositorioTomi.ObtenerParametro (lines 261-273 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L261-L273)) is documented as validating that the value is not empty but only checks that the key exists (the shared loader is what enforces non-empty values), and its exception message repeats the key twice.
+• Both AssemblyInfo.cs files carry empty company/description metadata.
+Recommendation: delete the unused members and imports, correct the typos, give MQErrorHandler a namespace and static modifier, and keep constant names unique and level-prefixed only where the prefix is intended.
+Benefit: less noise for reviewers and accurate log levels, at no behavioral risk.
+4.2 InfraestructuraSwfINMQ (Tier 1)
+MustChange / Rewrite
+MQ-FR-8 - A destructive, non-transactional MQ Get loses messages that are not persisted
+• Category / severity: MustChange/rewrite - Blocker
+• Evidence: RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L91-L118); git grep for SYNCPOINT|Commit(|Backout( finds nothing in the current tree, but finds MQGMO_SYNCPOINT, Commit(), and Backout() on the CodeReview branch (fd768e7, 2026-08-28); IBM documents the default in Syncpoint considerations in IBM MQ applications (https://www.ibm.com/docs/en/ibm-mq/9.3.x?topic=work-syncpoint-considerations-in-mq-applications)
+Code block (csharp)
+mqGetMessageOptions.WaitInterval = ConstantesServicio.WaitInterval;
+mqGetMessageOptions.Options += MQC.MQGMO_WAIT;
+try
+{
+    mqQueue.Get(message, mqGetMessageOptions);
+    ...
+    mensaje = message.ReadString(message.MessageLength);
+    ...
+    var IdICN = await InsertaMensajeMQ(mensaje);
+    if (string.IsNullOrEmpty(IdICN)) { ...; throw new InvalidOperationException(ConstantesServicio.MensajeNohayICN); }
+The read sets only MQGMO_WAIT; no MQGMO_SYNCPOINT is requested and no Commit()/Backout() exists in the solution. IBM states that when neither syncpoint option is specified the default is "no" on UNIX, Linux, Windows, and IBM i ("yes" only on z/OS), and this client runs on Windows, so the message is deleted from the queue as soon as Get returns. Everything after that point is unprotected: a SQL failure (MQ-FR-12), the procedure's blank-ICN rejection (it inserts nothing and returns an empty ICN), the 90-second stop bound of the base host (MQ-FR-11), or a process crash permanently removes an inbound SWIFT message that was never stored. The only surviving copy is the INFO log or the alert email, which MQ-FR-9 requires removing. The CodeReview branch contains the correct pattern (syncpoint get, Commit() after a successful insert, Backout() on failure, with unit tests); the current branch does not.
+Recommendation:
+Code block (csharp)
+mqGetMessageOptions.Options = MQC.MQGMO_WAIT | MQC.MQGMO_SYNCPOINT | MQC.MQGMO_FAIL_IF_QUIESCING;
+...
+queueManager.Commit();   // only after InsertaMensajeMQ returned a non-empty ICN
+...
+queueManager.Backout();  // in the failure path, then apply the backout threshold below
+Compare message.BackoutCount with a threshold (the queue's BOTHRESH/BOQNAME, or an explicit counter) and move poison messages to a backout/dead-letter queue with an alert, so one malformed message cannot block the queue. Call Backout() explicitly on every failure path before closing: IBM documents that MQDISC with uncommitted requests performs an implicit syncpoint, so a plain Disconnect() after a failure would commit and silently consume the message. The procedure already skips an existing folio/type, so redelivery after a crash between insert and commit is harmless. Cover commit, backout, and threshold behavior with tests through the seam in MQ-FR-13, and ship this before MQ-FR-9.
+Benefit: at-least-once delivery with idempotent persistence; a failure after the read can no longer make an inbound SWIFT message disappear.
+MQ-FR-9 - Remove the complete SWIFT message from logs and alert emails (GEN-5)
+• Category / severity: MustChange/rewrite - Blocker
+• Evidence: RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L102-L103), line 151 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L151), and the email body at lines 158-168 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L158-L168); unused shared masking helpers at Config.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Legacy/Config.cs#L127-L137) and Logging.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L147)
+Code block (csharp)
+mensaje = message.ReadString(message.MessageLength);
+Config.EscribirLog(ConstantesServicio.MensajeGET + mensaje + "*");                   // every message, INFO
+...
+Config.EscribirLog($"{ConstantesServicio.MensajeSPName}, '" + mensaje + "'");         // failure path
+...
+Mensaje = ConstantesServicio.Mensaje + mensaje + ConstantesClaveAviso.Error + "= " + exc.Message.ToString()   // email body
+The whole SWIFT message (account numbers, amounts, party names, narrative) is written to the application log at INFO for every message received, written again and emailed to the operations mailbox (MAIL_PSG or the default list) whenever a non-MQ exception ends the cycle (for example an insert failure). The review checklist treats full sensitive payloads in logs as a Blocker (sections 5 and 9). The shared logger already provides masking (EscribirLog(msg, masked) and WriteLegacyMasked(msg, text)), which is not used. mensaje is also declared outside the loop (line 47 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L47)) and replaced only after a successful read, so an error raised before the next read is reported against the previous message's payload.
+Recommendation: log only the MQ MessageId (hex), ICN, Format, byte length, and outcome; email only the ICN/MessageId, time, and error category; keep the payload in TB_SRV_SWF_TRABAJO (the procedure already stores it) or in a restricted backout queue. Deliver MQ-FR-8 first so that no message depends on the log copy for recovery.
+Benefit: removes the exposure of customer and financial data through logs, log shipping, and mailboxes.
+MQ-FR-10 - MQ failures are log-only, the cycle outcome is ambiguous, and the normal empty queue is logged as ERROR
+• Category / severity: MustChange/rewrite - Major
+• Evidence: RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L119-L146) and line 193 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L193); ConstantesServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L90); OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L202-L209); ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L127)
+Code block (csharp)
+catch (MQException ex)                       // inner handler, lines 119-138
+{
+    string errorMsg = MQErrorHandler.GetMQErrorDescription(ex.ReasonCode);
+    Config.EscribirLog(ConstantesServicio.MensajeERRORMQException + errorMsg);   // "ERROR|Lee_mensajes_MQ|MQ Exception:" + text
+    if (ex.ReasonCode == MQC.MQRC_NO_MSG_AVAILABLE) { ...; isContinue = false; }
+    else { ...; if (ex.Reason == MQC.MQRC_TRUNCATED_MSG_FAILED) { isContinue = false; } }
+    break;
+}
+...
+catch (MQException ex) { ...log only... }    // outer handler, lines 142-146
+...
+return respuesta;                            // line 193
+1. Every MQ failure (queue manager unavailable 2059, host unreachable 2538, channel unavailable 2537, unknown channel name 2540, not authorized 2035, security/TLS 2063/2381/2393/2400, connection broken 2009, unknown queue 2085) is handled by an inner or outer catch (MQException) that only writes a log line. Only the generic catch (Exception) sends an email, and no handler raises an alert. An expired TLS certificate or a disabled MQ account stops all inbound SWIFT intake while the only signal is a log line.
+2. The expected empty-queue reason (2033) is logged through an ERROR|-prefixed constant, so a healthy idle service writes an ERROR line every cycle.
+3. respuesta records only whether the last processed message was inserted (lines 109 and 115 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L109-L115)). An idle cycle or a connection failure returns false (indistinguishable), while *n* successes followed by a fatal MQ error or a database failure return true. OperacionServicio logs "se ejecuto correctamente" on true, calls ActualizaTerminacion regardless, and the host ignores the returned Boolean.
+4. The isContinue = false assignments are redundant because the handler always executes break (line 137 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L137)).
+5. The reason-code catalogue mislabels one code and omits its neighbour: `Codigo2540` (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs#L116) describes 2540 as MQRC_CHANNEL_NOT_AVAILABLE, but IBM defines 2540 as `MQRC_UNKNOWN_CHANNEL_NAME` (https://www.ibm.com/docs/en/ibm-mq/9.3.x?topic=codes-2540-09ec-rc2540-mqrc-unknown-channel-name) (the queue manager does not recognize the configured channel name) and `MQRC_CHANNEL_NOT_AVAILABLE` (https://www.ibm.com/docs/en/ibm-mq/9.3.x?topic=codes-2537-09e9-rc2537-mqrc-channel-not-available) as 2537, which has no entry and is logged as "Error MQ desconocido. Código: 2537". A wrong value in MQ.SWF_IN.CHANNEL is therefore reported to the operator as a channel-availability problem.
+Recommendation: return a result object (Idle, Processed(count), Failed(category, reasonCode)) and classify reason codes: 2033 is expected (no ERROR); availability errors (2009, 2059, 2537, 2538) log WARN, retry next tick, and alert after *N* consecutive failures; security/configuration errors (2035, 2063, 2381, 2393, 2400, 2085, 2540) raise an immediate CRITICO alert. Build the catalogue from MQC.MQRC_* constants, add the missing 2537 entry, and correct the 2540 label. Propagate Failed into the tick outcome (MQ-FR-4) and remove isContinue.
+Benefit: an MQ outage or certificate expiry pages someone, a healthy idle service is quiet, and tick outcomes are truthful.
+MQ-FR-11 - The read loop ignores cancellation, can outlive service stop, and cancellation becomes a Critical alert
+• Category / severity: MustChange/rewrite - Major
+• Evidence: token-less signature at IRepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Interfaces/IRepositorioTomi.cs#L14) and RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L40); loop at lines 91-139 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L91-L139); OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L202-L227); stop bounds in WindowsServiceHostBase.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L27-L28) and line 135 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L135)
+Code block (csharp)
+public async Task<bool> ObtieneLecturaMensajesMQ()        // no CancellationToken
+...
+while (isContinue) { ...; mqQueue.Get(message, mqGetMessageOptions); ... }
+...
+await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct);      // line 207
+...
+catch (Exception ex) { ...; ClaveAviso = ConstantesClaveAviso.Critico, ... }          // lines 212-226
+The method is declared async but performs only synchronous, blocking MQ calls (connect, a 5-second wait Get, disconnect) and neither accepts nor checks a CancellationToken. The loop ends only on an empty queue or an MQ error, so a backlog keeps it running after OnStop. The base host waits 60 s plus 30 s of cleanup and then returns without waiting further, so the process can be torn down in the middle of a message (and, with MQ-FR-8, that message is gone). Separately, the tick's catch (Exception) treats cancellation as a failure: when the loop returns after stop was requested, ActualizaTerminacion(..., ct) runs with a cancelled token and throws OperationCanceledException, which is logged as an error and turned into a CRITICO alert (if the loop outlives the host's stop bound, the process is torn down instead). EsDiaHabil() is also called without the token overload that exists (OperacionServicio.cs line 64 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L64)).
+Recommendation: add a CancellationToken parameter, check it between messages, shorten the wait interval (for example 1 s) so stop is honored promptly, and add MQGMO_FAIL_IF_QUIESCING; in OperacionServicio add catch (OperationCanceledException) when (ct.IsCancellationRequested) returning a Cancelled outcome without alerting, and finalize with the independent token from MQ-FR-4.
+Benefit: clean, prompt stops without lost in-flight messages or false Critical alerts.
+MQ-FR-12 - InsertaMensajeMQ hides why the insert failed
+• Category / severity: MustChange/rewrite - Major
+• Evidence: RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L219-L246) and the caller's log at line 150 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L150); shared result handling at RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L385-L391) and line 407 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L407)
+Code block (csharp)
+var icn = resultado?.Data?.FirstOrDefault()?.Icn;
+if (string.IsNullOrWhiteSpace(icn.ToString()))
+{ ...; throw new InvalidOperationException(ConstantesServicio.MensajeErrorIcn); }
+...
+catch (Exception ex)
+{
+    var mensajeError = $"{ConstantesClaveAviso.Error}|Ocurrió un error al Insertar Mensaje MQ: {ex}";
+    Config.EscribirLog(mensajeError);
+    throw new InvalidOperationException(mensajeError);
+}
+• The ?. chain yields null when the result or its rows are missing, and icn.ToString() then throws NullReferenceException, so the explicit "no ICN" guard works only for an empty string.
+• The shared EjecutarStoredProcedureQuery converts a SqlException (deadlock, timeout, permission, constraint) into a result with Exito = false, MensajeError, and empty Data without throwing when validarAfectacion is false. This method never reads Exito, MensajeError, or Exception, so a SQL failure surfaces as a NullReferenceException and the actual SQL cause is lost.
+• The catch wraps with new InvalidOperationException(mensajeError): the original exception is embedded as text, not as InnerException, and the same text is logged here and again by the caller.
+• The caller's log statement (line 150 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L150)) mixes concatenation syntax into an interpolated string, so it prints the literal words + mensaje + (the payload variable is never interpolated) and a stray + before the exception text.
+• A duplicate ICN returns the ICN without inserting, yet the success log says the message was inserted (MQ-FR-14).
+Recommendation:
+Code block (csharp)
+if (resultado == null || !resultado.Exito)
+    throw new InvalidOperationException($"{ConstantesServicio.uspInsertaMensajeMQ} failed: {resultado?.MensajeError}", resultado?.Exception);
+var icn = resultado.Data?.FirstOrDefault()?.Icn;
+if (string.IsNullOrWhiteSpace(icn)) throw new InvalidOperationException(ConstantesServicio.MensajeErrorIcn);
+Log once, preserve the inner exception, and rewrite the caller's log line with correct interpolation and without the payload.
+Benefit: database failures are diagnosable from the first log line instead of appearing as an unrelated NullReferenceException.
+Rewrite Recommended
+MQ-FR-13 - Separate MQ access from persistence and notification, and restore a test seam
+• Category / severity: rewrite_recommended - Major
+• Evidence: RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L40-L194) (one 155-line method that maps parameters, performs MQ I/O, decodes the message, calls the database, and sends the failure email) and lines 265-273 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L265-L273); git diff 58ed576 HEAD --stat shows Messaging/IMqClient.cs, MqClient.cs, and RepositorioTomiTests.cs present on the CodeReview branch and absent here
+Because the queue manager is created inline, none of the behavior in MQ-FR-8 to MQ-FR-12 can be tested without a real MQ server. RepositorioTomi also reads _configuracion.ParametrosSistema, which OperacionServicio populated moments earlier on the same scoped Configuracion instance; calling ObtieneLecturaMensajesMQ() from any context whose Configuracion.ParametrosSistema has not been populated throws NullReferenceException at the dictionary lookup (line 267 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L267)).
+Recommendation: reintroduce a narrow IMqClient (connect, get with options, commit, backout, close) plus a ConfiguracionMQ built once and passed in; keep RepositorioTomi to the stored-procedure call; move failure notification into an injected notifier. Then add tests for commit-after-insert, backout-on-failure, the backout threshold, idle (2033), fatal reason codes, and cancellation.
+Benefit: the highest-risk logic in the solution becomes testable and each class has one reason to change.
+MQ-FR-14 - Make duplicate and invalid outcomes of the insert procedure explicit
+• Category / severity: rewrite_recommended - Minor
+• Evidence: usp_SWF_INSERT_MQ_MSG.sql (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Incoming/SWF_IN_MQ/IT24/Procedures/001%20SP%20%5Bdbo%5D.%5Busp_SWF_INSERT_MQ_MSG%5D.sql#L57-L83) and its header note at line 32 (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Incoming/SWF_IN_MQ/IT24/Procedures/001%20SP%20%5Bdbo%5D.%5Busp_SWF_INSERT_MQ_MSG%5D.sql#L32); caller log at RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L236)
+Code block (sql)
+SET @txt_icn = REPLACE(RTRIM(LTRIM(SUBSTRING(@header, 1, 17))),' ','')
+IF @txt_icn <> ''
+BEGIN
+    ... IF @num_regs=0 INSERT INTO TB_SRV_SWF_PLAN_TRABAJO_MAESTRO ...
+    ... IF @num_regs=0 INSERT INTO TB_SRV_SWF_TRABAJO ...
+END
+SELECT @txt_icn AS Icn
+The procedure returns only the ICN in every case. A blank ICN (nothing inserted, a row with an empty Icn), a known ICN whose work row already exists (nothing inserted, the new payload discarded), and a real insert all complete without error and differ only by the empty string, so the caller logs "Se insertó correctamente el mensaje" even when nothing was stored. A re-sent message with the same ICN and type but different content is therefore dropped silently. The two inserts are not wrapped in a transaction or TRY/CATCH (the header notes "No incluye manejo explícito de errores"), @mq_msg uses the deprecated TEXT type, and no MQ MessageId reaches the database for traceability or reconciliation.
+Recommendation: return a status (INSERTED, DUPLICATE, INVALID_ICN) alongside Icn; accept the MQ MessageId and put time; consider storing a payload hash so conflicting duplicates are detectable; wrap both inserts in a transaction with TRY/CATCH ... THROW; migrate TEXT to VARCHAR(MAX)/NVARCHAR(MAX) after the integration test noted in Section 2; update the caller's log to match the status.
+Benefit: the database contract tells the service what actually happened, which supports accurate logging, reconciliation, and the backout logic in MQ-FR-8.
+MQ-FR-15 - Harden the MQ connection and open the queue with least privilege
+• Category / severity: rewrite_recommended - Minor (raise to Major if the queue manager certificate DN is not otherwise controlled)
+• Evidence: RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L65-L88) and line 96 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L96); IBM documents the managed-client options in Configuring TLS for managed IBM MQ .NET (https://www.ibm.com/docs/en/ibm-mq/9.3.x?topic=client-configuring-tls-managed-mq-net)
+Code block (csharp)
+MQEnvironment.UserId = configMQ.User;
+MQEnvironment.Password = configMQ.Password;
+MQEnvironment.SSLCipherSpec = configMQ.Ssl;
+MQEnvironment.SSLKeyRepository = configMQ.SslPath;
+...
+mqQueue = queueManager.AccessQueue(configMQ.QueueName, MQC.MQOO_OUTPUT + MQC.MQOO_INPUT_SHARED + MQC.MQOO_INQUIRE);
+if (queueManager.IsConnected) { ... } else { Config.EscribirLog(ConstantesServicio.MensajeConexiónFallida); }
+• Credentials and TLS settings are written to static, process-wide MQEnvironment members and remain set after the method returns; per-connection properties avoid shared mutable state.
+• No SSLPeerName is supplied, so the client never checks the queue manager certificate's distinguished name (IBM lists it as optional for the managed client). IBM also documents that an unrecognized CipherSpec is disregarded and the connection is negotiated by Windows policy, so the configured value does not by itself enforce a TLS version.
+• The queue is opened with MQOO_OUTPUT and MQOO_INQUIRE, although nothing is put or inquired, which widens the authority the service account must hold.
+• IsConnected == false is only logged and the loop proceeds.
+Recommendation: pass user, password, cipher, key repository, certificate label, and SSLPeerName (from a required parameter) in the per-connection Hashtable (verify the property names against the installed client, for example MQC.USER_ID_PROPERTY, MQC.PASSWORD_PROPERTY, MQC.SSL_PEER_NAME_PROPERTY); open the queue with MQOO_INPUT_SHARED | MQOO_FAIL_IF_QUIESCING; abort the cycle when not connected; confirm the cipher and Windows policy with the MQ administrators.
+Benefit: narrower credentials exposure, server identity verification, and a smaller authority footprint for the service account.
+4.3 SwfINMQ - Windows Service host (Tier 2)
+MustChange / Rewrite
+MQ-FR-16 - Service-state, termination, and alert results are awaited but never inspected (GEN-9)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L102), line 158 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L158), line 178 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L178); OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L71) (alerts at lines 71, 187, 215) and line 207 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L207); shared contracts at ControlServicio.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/ControlServicio.cs#L50-L64), RepositorioMaestro.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1219-L1229), and Alertas.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Alertas/Alertas.cs#L158)
+Code block (csharp)
+await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct);   // startup
+...
+await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);                                                // shutdown
+...
+await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);                                                                    // shutdown
+The Boolean overload of MarcarPuertoEnUsoAsync returns false without throwing when the stored-procedure result is unsuccessful or the call is cancelled; ActualizaTerminacion returns an unsuccessful StoredProcedureResult instead of throwing; and InsertarAlerta returns spResult.Exito. Every call site awaits the task and discards the value. A service can therefore start without having registered its PID and port, report a clean shutdown while the table still shows it in use, finish a tick with a stale run state (MQ-FR-4), and lose alerts without anyone noticing. (.Pid.Value at line 102 is unnecessary because the API takes int?; it is safe in practice, see GEN-8.)
+Recommendation: use MarcarPuertoEnUsoConResultadoAsync, which throws a typed failure, at startup so a failed registration stops the start with a clear log; at shutdown log a WARN with the result when it is false; check Exito for ActualizaTerminacion and InsertarAlerta and log failures with the service name; pass Pid as int?. Add host tests for false and exception outcomes.
+Benefit: the persisted run/port state and the alert trail are trustworthy, and startup fails loudly instead of running unregistered.
+Rewrite Recommended
+MQ-FR-17 - Tighten host lifecycle handling, logging setup, and dead registrations
+• Category / severity: rewrite_recommended - Minor
+• Evidence: ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L139-L184), lines 119-133 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L119-L133), line 81 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L81), line 84 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L84); OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L14); base hook at WindowsServiceHostBase.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L58)
+Code block (csharp)
+IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();   // line 142
+try
+{
+    if (_containerDI == null || _configuracionBase == null)                         // line 145: guard placed after the dereference
+    {
+        Config.EscribirLog(ConstantesServicio.MensajeOmitido);
+        return;
+    }
+• TerminacionAsync dereferences _containerDI at line 142, before the guard at line 145 that exists to handle "initialization incomplete". If Inicializacion never created the container (a stop right after start), a NullReferenceException escapes before the try (the base class catches and logs it), so neither the guard message nor the finally (final ActualizaTerminacion and container disposal) runs. The base class provides InicializacionCompleta for exactly this check and the host does not override it. The same method's finally also dereferences _configuracionBase (inside its own inner try, so the effect is only a logged error), which means the guard does not fully protect the cleanup path either.
+• OnTimerAsync catches every exception, logs cancellation as an error, and discards the tick outcome (lines 127-133 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L127-L133)); the base class treats OperationCanceledException as a normal shutdown (line 381 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L381)). TerminacionAsync likewise logs cancellation through an ERROR| constant (lines 165-168 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L165-L168)).
+• EstadoHorarioOperacion is registered (line 81 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L81)) but never injected, and the local IOperacionServicio is never registered because the host resolves the concrete class (lines 84 and 126 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L126)). The local interface needs an alias (OperacionServicio.cs line 14 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L14)) because the shared MUFG_T24.Interfaces_utilidades.IOperacionServicio has the same name with a different signature.
+• The host initializes logging through the obsolete legacy wrapper (using MUFG_T24.Logeo_utilidades, line 75 (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L75)) and passes TamanoMaximoArchivoLogKB to its maxMb parameter; the shared initializer multiplies that value by 1,024 to obtain kilobytes (Logging.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Logging/Logging.cs#L32-L41)). If the configured value really is in kilobytes, the rotation threshold is about 1,024 times larger than intended and files effectively never roll over. Confirm the configured unit (it is read from an encrypted service setting).
+Recommendation: override InicializacionCompleta => _containerDI != null && _configuracionBase != null and remove the early GetInstance; let OperationCanceledException pass (or return quietly) in OnTimerAsync and TerminacionAsync; surface the tick outcome (MQ-FR-4); delete the unused registration; rename the local interface (for example IProcesadorSwiftInMQ), register it, and resolve through it; move to MUFG_T24.Infraestructura.Logging.Logging and pass a megabyte value (or add a kilobyte-based overload).
+Benefit: an orderly stop at every lifecycle stage, accurate log levels, and no name collision with the shared library.
+4.4 PruebasUnitarias (Tier 2)
+MustChange / Rewrite
+MQ-FR-18 - The test project cannot execute and covers none of the production logic (GEN-2, effective)
+• Category / severity: MustChange/rewrite - Major
+• Evidence: SwfINMQTest.cs (../../SWIFT/Incoming/SWF_IN_MQ/PruebasUnitarias/SwfINMQTest.cs#L21-L114); production overload at OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L65); shared overload set at IParametrizacion.cs (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Interfaces/Parametrizacion/IParametrizacion.cs#L23-L28)
+Code block (csharp)
+private OperacionServicio _servicio = null;                              // line 21: never assigned
+[TestInitialize] private void Initialize() { /* creates the mocks */ }    // line 23: private, never called
+[TestInitialize] public void Setup() { var config = new Configuracion { ... }; }   // line 32: local discarded
+[TestMethod] public async Task EjecutarProcedimientosAsync_ReturnsTrueTest(CancellationToken ct)
+{ var result = await _servicio.EjecutarProcedimientosAsync(ct); Assert.IsTrue(result); }
+[TestMethod] public async Task EjecutarProcedimientosAsync_ReturnsFalse_WhenNoDiaHabil(CancellationToken ct)
+{ ...; Assert.IsTrue(resultado); }
+_parametrizacion.Setup(x => x.ObtenerParametrosSistemaAsync(It.IsAny<string>(), It.IsAny<string>())).ReturnsAsync(...);   // line 109
+• _servicio is initialized to null and never assigned. The only code that creates the mocks (Initialize) is private and never invoked, and the second [TestInitialize] builds a Configuracion local that is discarded. Every test that reaches _servicio or a mock throws NullReferenceException.
+• Two [TestMethod] methods take a CancellationToken parameter; MSTest cannot supply one without a data source (signature rule UTA007), so they do not run as written.
+• ReturnsFalse_WhenNoDiaHabil asserts IsTrue, contradicting its name, and its Configuracion is unused.
+• ValidacionProcesos configures the obsolete two-argument ObtenerParametrosSistemaAsync overload, while production calls the three-argument overload with a token, so even a constructed service would not hit the mock; it asserts nothing about alerts, the schedule, the lifecycle, or the repository call.
+• Net effect: none of the three methods can pass or fail for a meaningful reason. Schedule selection, lifecycle marking, MQ reading, persistence, alerting, and host behavior have no effective coverage, and the repository tests that existed on the CodeReview branch were not carried into this branch (MQ-FR-13).
+Recommendation: build OperacionServicio and its mocks in one public [TestInitialize]; remove parameterized test signatures; add per-weekday schedule tests (MQ-FR-1/2/3/6), non-business-day and off-hours tests that verify skip outcome, alert policy, and finalization (MQ-FR-4/5), cancellation tests (MQ-FR-11), and MQ-seam tests (MQ-FR-13); assert returned outcomes using strict mocks for lifecycle and alert collaborators; run the suite in CI (MQ-FR-20).
+Benefit: a regression net for the code that currently carries the Blocker and Major findings.
+4.5 Solution-wide / build
+MustChange / Rewrite
+MQ-FR-19 - Replace absolute D:\ServiceCMS references (GEN-1)
+• Category / severity: MustChange/rewrite - Blocker
+• Evidence: AplicacionSwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/AplicacionSwfINMQ.csproj#L14-L18), InfraestructuraSwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/InfraestructuraSwfINMQ.csproj#L17-L25), SwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/SwfINMQ.csproj#L62-L64), PruebasUnitarias.csproj (../../SWIFT/Incoming/SWF_IN_MQ/PruebasUnitarias/PruebasUnitarias.csproj#L74-L77)
+Code block (xml)
+<Reference Include="MUFG_T24">
+  <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+</Reference>
+<Reference Include="amqmdnet">
+  <HintPath>D:\ServiceCMS\amqmdnet.dll</HintPath>
+</Reference>
+All four projects reference D:\ServiceCMS\MUFG_T24.dll (four references) and the Infrastructure project also references D:\ServiceCMS\amqmdnet.dll, the IBM MQ client that every MQ call depends on. No nuget.config, MUFG_T24 package, or MQ client package exists in the portfolio, and D:\ServiceCMS is absent here, so the solution cannot be restored or built on any machine that lacks that exact folder, and nothing records which build of either binary was used. The review checklist classifies direct DLL references as a Blocker (section 11).
+Recommendation: publish MUFG_T24 and the IBM MQ client to the internal NuGet feed as pinned versions, replace the HintPath entries with PackageReference, and commit a nuget.config that names the feed. This is the portfolio-wide remediation described in GEN-1.
+Benefit: reproducible builds, version traceability, and a CI-verifiable dependency set.
+Nice to Rewrite if Time Permits
+MQ-FR-20 - Align package management and add a CI build
+• Category / severity: NiceToRewrite_ifTimePermits - Minor
+• Evidence: AplicacionSwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/AplicacionSwfINMQ.csproj#L10-L12), InfraestructuraSwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/InfraestructuraSwfINMQ.csproj#L9-L11), SwfINMQ/packages.config (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/packages.config), PruebasUnitarias/packages.config (../../SWIFT/Incoming/SWF_IN_MQ/PruebasUnitarias/packages.config)
+• The two libraries restore with PackageReference, while the host and test project use packages.config with different versions of the same helper packages (System.Runtime.CompilerServices.Unsafe 4.5.2 vs 4.5.3, System.Threading.Tasks.Extensions 4.5.2 vs 4.5.4).
+• Newtonsoft.Json 13.0.4 (line 11 (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/AplicacionSwfINMQ.csproj#L11)) is referenced by the application project, but no source file uses it. System.Data.SqlClient 4.9.1 (line 10 (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/InfraestructuraSwfINMQ.csproj#L10)) is also unused in source and has been superseded by Microsoft.Data.SqlClient; verify whether it only exists to satisfy a runtime dependency of MUFG_T24 before removing it.
+• MSTest 2.2.10 is at least one major version behind the current MSTest line.
+• No CI/build definition is tracked, so nothing proves a clean restore, build, or test run, and the .slnx format needs a recent Visual Studio/MSBuild.
+Recommendation: move all four projects to PackageReference, remove unused packages after checking the runtime dependency, align helper-package versions, plan the MSTest and SQL client upgrades, and add a pipeline that restores, builds, and runs the tests.
+Benefit: one restore model, fewer deprecated or unused dependencies, and automated build/test evidence.
+5. Architecture-Fit Note
+The workload is a continuous-intake, poll-based consumer: a timer-driven Windows Service that reconnects to the queue manager on every tick, drains the queue, and writes each message to a work table that other SWIFT-incoming components consume. It is already inherently message-driven, so the lowest-risk path is to modernize in place after correcting the findings, following the sequence in _ORCHESTRATION.md section 6: first remove the loss and exposure risks (MQ-FR-8, MQ-FR-9, MQ-FR-12, MQ-FR-10, MQ-FR-11) and the schedule/lifecycle defects (MQ-FR-1 to MQ-FR-5); then remove the duplication, restore the MQ seam, and add real tests (MQ-FR-6, MQ-FR-13, MQ-FR-18); and only then evaluate hosting modernization. The target shape is the standard reliable-consumer pattern (transactional get, idempotent persist, commit, backout/dead-letter queue) rather than a new platform. A persistent MQ connection or an asynchronous message listener would replace the connect/poll/disconnect cycle (about 8,640 cycles a day at the 10-second default interval); a .NET 8 Worker Service would align hosting with current Microsoft guidance. Those options depend on facts this audit does not have: queue volume and peak rate, intake-latency SLA, whether the operating window is a business rule or only a legacy throttle (messages wait safely in MQ outside it), whether weekend or overnight intake is required, hosting constraints for the 32-bit managed MQ client, and budget. A microservices rewrite is not justified by the current evidence.
+6. JIRA-Ready Backlog
+ID	Title	Category	Project	File(s)	Priority
+MQ-FR-1	Use Tuesday's operating-window parameters	MustChange/rewrite	AplicacionSwfINMQ	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L107-L117)	Major
+MQ-FR-2	Use Saturday's closing parameter and decide weekend intake	MustChange/rewrite	AplicacionSwfINMQ	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L151-L161)	Major
+MQ-FR-3	Fail visibly on invalid schedule or date values and log the raw value	MustChange/rewrite	AplicacionSwfINMQ	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L84-L92)	Major
+MQ-FR-4	Finalize execution state on every tick outcome (GEN-7)	MustChange/rewrite	AplicacionSwfINMQ	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L55-L227)	Major
+MQ-FR-5	Stop alerting and logging ERROR for expected non-operating states (GEN-10)	MustChange/rewrite	AplicacionSwfINMQ	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L68-L83)	Major
+MQ-FR-6	Replace the duplicated schedule blocks with one tested parser	rewrite_recommended	AplicacionSwfINMQ	OperacionServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/OperacionServicio.cs#L94-L173)	Major
+MQ-FR-7	Remove constant, naming, and dead-code noise	NiceToRewrite_ifTimePermits	Aplicacion / Infraestructura / host	ConstantesServicio.cs (../../SWIFT/Incoming/SWF_IN_MQ/AplicacionSwfINMQ/Enums/ConstantesServicio.cs)	Minor
+MQ-FR-8	Read MQ messages under syncpoint with commit, backout, and a backout queue	MustChange/rewrite	InfraestructuraSwfINMQ	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L91-L118)	Blocker
+MQ-FR-9	Remove the SWIFT payload from logs and alert emails (GEN-5)	MustChange/rewrite	InfraestructuraSwfINMQ	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L102-L103)	Blocker
+MQ-FR-10	Alert on MQ failures, return a truthful cycle outcome, and stop logging idle as ERROR	MustChange/rewrite	InfraestructuraSwfINMQ	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L119-L146)	Major
+MQ-FR-11	Honor cancellation in the read loop and stop alerting on cancellation	MustChange/rewrite	InfraestructuraSwfINMQ	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L91-L139)	Major
+MQ-FR-12	Surface the stored-procedure failure cause in InsertaMensajeMQ	MustChange/rewrite	InfraestructuraSwfINMQ	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L219-L246)	Major
+MQ-FR-13	Extract an MQ client seam and notifier from RepositorioTomi	rewrite_recommended	InfraestructuraSwfINMQ	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L40-L194)	Major
+MQ-FR-14	Return explicit INSERTED/DUPLICATE/INVALID outcomes from the insert procedure	rewrite_recommended	InfraestructuraSwfINMQ / SQL	usp_SWF_INSERT_MQ_MSG.sql (../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Incoming/SWF_IN_MQ/IT24/Procedures/001%20SP%20%5Bdbo%5D.%5Busp_SWF_INSERT_MQ_MSG%5D.sql#L57-L83)	Minor
+MQ-FR-15	Harden MQ connection properties and queue-open options	rewrite_recommended	InfraestructuraSwfINMQ	RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/Repositorio/RepositorioTomi.cs#L65-L96)	Minor
+MQ-FR-16	Inspect service-state, termination, and alert results (GEN-9)	MustChange/rewrite	SwfINMQ host	ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L102)	Major
+MQ-FR-17	Fix host lifecycle, logging-setup, and dead-registration hygiene	rewrite_recommended	SwfINMQ host	ServiceHost.cs (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/ServiceHost.cs#L139-L184)	Minor
+MQ-FR-18	Repair the non-functional test project and add behavior coverage (GEN-2)	MustChange/rewrite	PruebasUnitarias	SwfINMQTest.cs (../../SWIFT/Incoming/SWF_IN_MQ/PruebasUnitarias/SwfINMQTest.cs#L21-L114)	Major
+MQ-FR-19	Replace absolute D:\ServiceCMS references (GEN-1)	MustChange/rewrite	All projects	InfraestructuraSwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/InfraestructuraSwfINMQ/InfraestructuraSwfINMQ.csproj#L17-L25)	Blocker
+MQ-FR-20	Align package management and add a CI build	NiceToRewrite_ifTimePermits	Solution	SwfINMQ.csproj (../../SWIFT/Incoming/SWF_IN_MQ/SwfINMQ/SwfINMQ.csproj)	Minor
+
