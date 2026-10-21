@@ -1,0 +1,2181 @@
+using Aplicacion_OutRead;
+using Aplicacion_OutRead.DTOs;
+using Aplicacion_OutRead.Interfaces;
+using Aplicacion_OutRead.Servicios;
+using Infraestructura_OutRead.Comun;
+using Infraestructura_OutRead.Repositorios;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Encriptacion;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Infraestructura.Logging;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace SWF_OUT_READ
+{
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        private Container _containerDI;
+        private Configuracion _configuracionBase;
+        protected override string NombreServicioLog => NombreServicio.Swf_OUT_Read.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 10000;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ServiceHost()
+        {
+        }
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del contenedor DI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<IAlertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+            _containerDI.Register<ConexionT24Mw>(() => new ConexionT24Mw(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW), Lifestyle.Singleton);
+            _containerDI.Register<IAppLogger, AppLogger>(Lifestyle.Scoped);
+
+            //Carga la configuración propia del servicio desde configuración encriptada...
+            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio.
+            _configuracionBase = new Configuracion();
+
+            //Establece las rutas de log...
+            {
+                ConfiguracionEncriptadaHelper.Inicializar();
+                ServicioConfiguracionSettings servicioMainConfiguracion = ConfiguracionEncriptadaHelper.ObtenerServicio(NombreServicio.Swf_OUT_Read.ToString());
+                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.PathLog = servicioMainConfiguracion.Log;
+                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+                _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
+
+                RutasConfiguracion rutas = new RutasConfiguracion()
+                {
+                    MUFG_Servicios_Path_Log = _configuracionBase.PathLog
+                };
+                Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+                Logging.Write("INFO|OnStart|Leyendo archivo de configuración.");
+            }
+
+            //Registra la configuracion como Transient + Factory (lazy)...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+
+            //Registra los componentes
+            _containerDI.Register<Aplicacion_OutRead.Interfaces.IOperacionServicio, OperacionServicio>();
+            _containerDI.Register<IRecuperacionDatos<SwiftMessagesDTO>, MensajesSwiftDao>();
+            _containerDI.Register<IMensajesSwift998, MensajesSwift998Dao>();
+            _containerDI.Register<IUsuariosTimeDeposits, UsuariosTimeDepositsDao>();
+            _containerDI.Register<IReglasNegocio, ReglasNegocioService>();
+
+            _containerDI.Verify();
+
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Obtiene el proceso actual...
+                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+                _configuracionBase = await _parametrizacion.ObtenerProcesoActualAsync(_configuracionBase, ct);
+
+                //Marca el servicio en uso...
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct);
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ParametrizacionesAsync|{ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>  
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Ejecuta el procedimiento principal del servicio...
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    var operacionServicio = _containerDI.GetInstance<Aplicacion_OutRead.Interfaces.IOperacionServicio>();
+                    await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Realiza_timer|Se presenta exception: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken ct, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            Config.EscribirLog("INFO|OnStop|Finalizando Servicio.");
+
+            try
+            {
+                if (_containerDI == null || _configuracionBase == null)
+                {
+                    Config.EscribirLog("INFO|OnStop|Terminación omitida por inicialización incompleta.");
+                    return;
+                }
+
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    Configuracion _configuracion = _containerDI.GetInstance<Configuracion>();
+                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, ct).ConfigureAwait(false);
+                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, ct).ConfigureAwait(false);
+
+                    //Marca el servicio en uso...
+                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracion.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    //Marca el termino del servicio...
+                    await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, cleanupCt).ConfigureAwait(false);
+                }
+
+                Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
+            }
+            catch (OperationCanceledException)
+            {
+                //Apagado normal
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|TerminacionAsync|{ex}");
+            }
+            finally
+            {
+                _containerDI?.Dispose();
+            }
+
+        }
+    }
+}
+
+*****************************
+
+using Aplicacion_OutRead.Enums;
+using Aplicacion_OutRead.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
+
+namespace Infraestructura_OutRead.Comun
+{
+    public class AppLogger : IAppLogger
+    {
+
+        private readonly IAlertas _alertas;
+        private readonly Configuracion _configuracion;
+
+        public AppLogger(IAlertas alertas, Configuracion configuracion)
+        {
+            _alertas = alertas;
+            _configuracion = configuracion;
+        }
+
+        /// <summary>
+        /// Método para uso de logs.
+        /// Ej. Log INFO o WARNING: Log(TipoLog.INFO, "Proceso iniciado");
+        /// </summary>
+        public void Log(
+            TipoLog tipo,
+            string mensaje,
+            [CallerMemberName] string metodo = "")
+        {
+            Config.EscribirLog($"{tipo}|{metodo}|{mensaje}");
+        }
+
+        /// <summary>
+        /// Método para uso de logs asincrono.
+        /// Ej. Log INFO o WARNING: await LogAsync(TipoLog.INFO, "Proceso iniciado");
+        /// Ej. Log Error: await LogAsync(TipoLog.ERROR, "Error en procesamiento", ex, generarAlerta: true, claveAviso: ConstantesClaveAviso.Critico); 
+        /// </summary>
+        public async Task LogAsync(
+            TipoLog tipo,
+            string mensaje,
+            Exception ex = null,
+            bool generarAlerta = false,
+            string claveAviso = null,
+            [CallerMemberName] string metodo = "")
+        {
+            var texto = $"{tipo}|{metodo}|{mensaje}";
+
+            if (ex != null)
+                texto += $" | Exception: {ex}";
+
+            Config.EscribirLog(texto);
+
+            if (generarAlerta)
+            {
+                try
+                {
+                    await _alertas.InsertarAlerta(new AlertaDTO
+                    {
+                        Servicio = _configuracion.NombreServicio,
+                        ClaveAviso = claveAviso ?? tipo.ToString(),
+                        Descipcion = mensaje,
+                        PId = _configuracion.Pid.Value,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = ex
+                    });
+                }
+                catch (Exception alertaEx)
+                {
+                    Config.EscribirLog($"ERROR|{metodo}|Error insertando alerta: {alertaEx.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Método para manejo de excepciones
+        /// EJ: await ManejarErrorAsync(ex, "Error en procesamiento");
+        /// </summary>
+        public Task ManejarErrorAsync(
+            Exception ex,
+            string descripcion,
+            string claveAviso = ConstantesClaveAviso.Critico,
+            [CallerMemberName] string metodo = "")
+        {
+            return LogAsync(
+                TipoLog.ERROR,
+                descripcion,
+                ex,
+                generarAlerta: true,
+                claveAviso: claveAviso,
+                metodo: metodo
+            );
+        }
+
+    }
+}
+
+***************************
+
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
+
+namespace Infraestructura_OutRead
+{
+    public static class DataContextHelpers
+    {
+        /// <summary>
+        /// Método que convierte de un DataTable a Entity
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="dt"></param>
+        /// <returns></returns>
+        public static List<T> ToListEntity<T>(this DataTable dt) where T : new()
+        {
+            var propiedades = typeof(T).GetProperties();
+
+            return dt.AsEnumerable().Select(row =>
+            {
+                var obj = new T();
+
+                foreach (var prop in propiedades)
+                {
+                    if (!dt.Columns.Contains(prop.Name) || row[prop.Name] == DBNull.Value)
+                        continue;
+
+                    var valor = row[prop.Name];
+
+                    var tipoDestino = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
+
+                    var valorConvertido = Convert.ChangeType(valor, tipoDestino);
+
+                    prop.SetValue(obj, valorConvertido);
+                }
+
+                return obj;
+            }).ToList();
+        }
+    }
+}
+********************
+
+using Aplicacion_OutRead.DTOs;
+using Aplicacion_OutRead.Enums;
+using Aplicacion_OutRead.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Infraestructura_OutRead.Repositorios
+{
+    public class UsuariosTimeDepositsDao : RepositorioMaestro, IUsuariosTimeDeposits
+    {
+
+        public UsuariosTimeDepositsDao() : base(BasedatosProveedor.SqlServer, NombreBasedatos.INSIGHT, null, null)
+        {
+        }
+
+        public async Task<IEnumerable<UsuarioTimeDepositDTO>> ObtenerUsuariosTimeDeposits(string listaClientes, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var query = ConstantesServicio.QueryInsight;
+
+            var resultado = await EjecutarReader<UsuarioTimeDepositDTO>(
+                query,
+                cmd =>
+                {
+                    cmd.Parameters.Add(
+                        basedatosConexion.CrearParametro("@listaClientes", listaClientes)
+                    );
+                },
+                CommandType.Text,
+                false
+            );
+
+            if (!resultado.Exito)
+            {
+                throw resultado.Exception ?? new Exception(resultado.MensajeError);
+            }
+
+            ct.ThrowIfCancellationRequested();
+
+            return resultado.Data;
+        }
+
+
+
+    }
+}
+******
+using Aplicacion_OutRead.DTOs;
+using Aplicacion_OutRead.Enums;
+using Aplicacion_OutRead.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Infraestructura_OutRead.Repositorios
+{
+    public class MensajesSwift998Dao : RepositorioMaestro, IMensajesSwift998
+    {
+        public MensajesSwift998Dao() : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        {
+        }
+
+        /// <summary>
+        /// Obtiene lista de Mensajes Swift 998
+        /// </summary>
+        /// <returns></returns>
+        public async Task<IEnumerable<SwiftMessages998DTO>> ObtenerMensajesSwift998(CancellationToken ct = default)
+        {
+            var resultado = await EjecutarStoredProcedureQuery<SwiftMessages998DTO>(ConstantesServicio.uspObtenerMensajesSwift998, cmd => { }, ct);
+
+            if (!resultado.Exito)
+            {
+                throw resultado.Exception ?? new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+        }
+
+        /// <summary>
+        /// Realiza la inserción de lista de mensajes T24 y 998
+        /// </summary>
+        public async Task<bool> InsertarMensajeSwiftAsync(
+            SwiftMessagesDTO swiftMensajeDto,
+            string tipoOperacion,
+            CancellationToken ct = default)
+        {
+            swiftMensajeDto.TRANSACTION_REF = DameTexto(swiftMensajeDto.TRANSACTION_REF);
+
+            var resultado = await EjecutarStoredProceduredNonQuery(
+                ConstantesServicio.uspInsertMessagesT24,
+                cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@folio", swiftMensajeDto.MSG_ID));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipo_operacion", tipoOperacion));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@cve_mensaje", swiftMensajeDto.MESSAGE_TYPE));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@transaction_ref", swiftMensajeDto.TRANSACTION_REF));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@swf_msg", swiftMensajeDto.SWIFT_MSG));
+                }, ct);
+
+            if (!resultado.Exito)
+            {
+                throw resultado.Exception ?? new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Exito;
+        }
+
+
+
+        /// <summary>
+        /// Método de apoyo para cadena.
+        /// </summary>
+        private string DameTexto(object valor, int largo = 0)
+        {
+            var texto = valor?.ToString() ?? string.Empty;
+
+            if (largo > 0 && texto.Length > largo)
+                return texto.Substring(0, largo);
+
+            return texto;
+        }
+    }
+}
+
+***********************
+
+using Aplicacion_OutRead.DTOs;
+using Aplicacion_OutRead.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Infraestructura_OutRead.Repositorios
+{
+    public class MensajesSwiftDao : RepositorioMaestro, IRecuperacionDatos<SwiftMessagesDTO>
+    {
+        private readonly ConexionT24Mw _t24;
+
+        public MensajesSwiftDao(ConexionT24Mw t24) : base(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW, null, null)
+        {
+            _t24 = t24;
+        }
+
+        /// <summary>
+        /// Método que obtiene lista de mnensajes Swift T24 desde MUFG
+        /// </summary>
+        /// <returns></returns>
+        public async Task<IEnumerable<SwiftMessagesDTO>> ObtenerInfoSwiftAsync(CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+            var dt = await _t24.LeerMensajesSwfT24();
+            ct.ThrowIfCancellationRequested();
+            return dt.ToListEntity<SwiftMessagesDTO>();
+        }
+
+        /// <summary>
+        /// Se realiza marcado de mensajes swift t24
+        /// </summary>
+        public async Task<bool> MarcarMensajesSwiftT24(Dictionary<string, string> swfHeadersId, CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+            var procesados = await _t24.MarcaMensajesSwfT24(swfHeadersId);
+            ct.ThrowIfCancellationRequested();
+            return procesados;
+        }
+
+    }
+}
+
+***********************
+
+namespace Aplicacion_OutRead.Enums
+{
+    public static class ConstantesServicio
+    {
+        //Constantes de parametrización...
+        public const string ParametrosSistema = "'HORA_OP_INICIO','HORA_OP_CEP_FIN', 'SWF_CRITERIO_COMPLETO', 'SWF_OUT_GET_MT_BATCH'";
+        public const string HoraInicioRead = "HORA_OP_INICIO";
+        public const string HoraFinRead = "HORA_OP_CEP_FIN";
+        public const string SWFOutGetMtBatch = "SWF_OUT_GET_MT_BATCH";
+        public const string NombreServicio = "SWF_OUT_READ";
+
+        //Constantes de SQL...
+        public const string uspObtenerMensajesSwift998 = "usp_SwfOutRead_GetMensajesSwift998";
+        public const string uspGetUsuariosTimeDeposits = "MUFG_MX2_GetUsuariosTimeDeposits";
+        public const string uspInsertMessagesT24 = "usp_SwfOutRead_InsertMensajesT24";
+
+
+
+        //Constantes de lógica...
+        public const string T24_Swift_MX_Addr = "BOTKMXMX";
+        public const string MessageTypeMensajesSwift998 = "998";
+        public const string TipoOperacion = "SWIFT_OUT";
+        public const string MessageTypeKeySwift998 = "MT-998";
+        public const string SecuenciaMensajeT24 = "F01DEMOGBPXXXXX";
+
+        public const string QueryInsight = @"SELECT 
+    A.[@ID]                                                      AS id,
+    A.CUSTOMER_ID                                                AS customer_id,
+    'CAMSLINK' + ISNULL(
+        RIGHT(REPLICATE('0', 8) + SUBSTRING(L.legacy_loan_id, 5, 8), 8),
+        RIGHT(A.[@ID], 8)
+    )                                                            AS trans_ref_num,
+    CAST(999 AS VARCHAR(10))                                                          AS des_sub_msg,
+    NULL                                                         AS des_prop_msg,
+    'CI,' + RIGHT(REPLICATE('0', 8) + A.CUSTOMER_ID, 8)          AS id_customer_CI,
+    'RI,OETD0'                                                   AS id_report_CI,
+    CONVERT(VARCHAR, A.MIS_DATE, 112)                            AS date_report,
+    RIGHT(REPLICATE('0', 8) + A.CUSTOMER_ID, 8)                  AS id_customer,
+    SUBSTRING(B.NAME_1, 1, 34)                                   AS txt_customer_name,
+    ISNULL('100' + REPLACE(L.legacy_loan_id, '-', ''), A.[@ID])  AS cod_bank_reference,
+    A.CURRENCY                                                   AS cod_currency,
+    A.DRAWDOWN_NET_AMT                                           AS amnt_original_principal,
+    A.AMOUNT                                                     AS amnt_current_principal,
+    NULL                                                         AS date_contract,
+    CONVERT(VARCHAR, A.VALUE_DATE, 112)                          AS date_value,
+    CONVERT(VARCHAR, A.FIN_MAT_DATE, 112)                        AS date_maturity,
+    NULL                                                         AS date_interest_rate,
+    NULL                                                         AS cycle_interest_rate,
+    CONVERT(VARCHAR, A.FIN_MAT_DATE, 112)                        AS date_next_interest_paymnt,
+    'MATURITY'                                                   AS cycle_interest_paymnt,
+    A.TOT_INTEREST_AMT                                           AS amnt_next_interest_paymnt,
+    CAST(
+			CONVERT(NUMERIC(10,4), A.INTEREST_RATE) +
+			CONVERT(NUMERIC(10,4), A.INTEREST_SPREAD)
+		AS VARCHAR(50))											 AS rate_current_interest,
+    NULL                                                         AS rate_tax,
+    NULL                                                         AS amnt_tax,
+    NULL                                                         AS amnt_next_current_interest,
+    NULL                                                         AS num_account,
+    CAST(1 AS VARCHAR(10))										 AS trans_ref_num_5n,
+    CAST(1 AS VARCHAR(10))                                       AS num_related_reference,
+    CAST(1 AS VARCHAR(10))                                       AS num_maximum_related_ref,
+    CAST(0 AS VARCHAR(10))                                       AS flag_daytime,
+
+    CAST(
+          ':20:' + 'CAMSLINK' 
+        + ISNULL(
+            RIGHT(REPLICATE('0', 8) + SUBSTRING(L.legacy_loan_id, 5, 8), 8),
+            RIGHT(A.[@ID], 8)
+        ) + CHAR(13) + CHAR(10)
+
+        + ':12:999' + CHAR(13) + CHAR(10)
+        + ':77E:' + CHAR(13) + CHAR(10)
+
+        + 'CI,' + RIGHT(REPLICATE('0', 8) + A.CUSTOMER_ID, 8) + CHAR(13) + CHAR(10)
+        + 'RI,OETD0' + CHAR(13) + CHAR(10)
+        + CONVERT(VARCHAR, A.MIS_DATE, 112) + CHAR(13) + CHAR(10)
+        + RIGHT(REPLICATE('0', 8) + A.CUSTOMER_ID, 8) + CHAR(13) + CHAR(10)
+        + SUBSTRING(B.NAME_1, 1, 34) + CHAR(13) + CHAR(10)
+        + ISNULL('100' + REPLACE(L.legacy_loan_id, '-', ''), A.[@ID]) + CHAR(13) + CHAR(10)
+        + A.CURRENCY + CHAR(13) + CHAR(10)
+        + REPLACE(CAST(A.DRAWDOWN_NET_AMT AS VARCHAR), '.', ',') + CHAR(13) + CHAR(10)
+        + REPLACE(CAST(A.AMOUNT AS VARCHAR), '.', ',') + CHAR(13) + CHAR(10)
+        + '' + CHAR(13) + CHAR(10)
+        + CONVERT(VARCHAR, A.VALUE_DATE, 112) + CHAR(13) + CHAR(10)
+        + CONVERT(VARCHAR, A.FIN_MAT_DATE, 112) + CHAR(13) + CHAR(10)
+        + '' + CHAR(13) + CHAR(10)
+        + '' + CHAR(13) + CHAR(10)
+        + CONVERT(VARCHAR, A.FIN_MAT_DATE, 112) + CHAR(13) + CHAR(10)
+        + 'MATURITY' + CHAR(13) + CHAR(10)
+        + REPLACE(CAST(A.TOT_INTEREST_AMT AS VARCHAR), '.', ',') + CHAR(13) + CHAR(10)
+        + REPLACE(
+            CAST(
+                CONVERT(NUMERIC(10,4), A.INTEREST_RATE) 
+                + CONVERT(NUMERIC(10,4), A.INTEREST_SPREAD) AS VARCHAR
+            ), '.', ','
+          ) + CHAR(13) + CHAR(10)
+        + '' + CHAR(13) + CHAR(10)
+        + '' + CHAR(13) + CHAR(10)
+        + '' + CHAR(13) + CHAR(10)
+        + '' + CHAR(13) + CHAR(10)
+        + '1' + CHAR(13) + CHAR(10)
+        + '1' + CHAR(13) + CHAR(10)
+        + '1' + CHAR(13) + CHAR(10)
+        + '0' + CHAR(13) + CHAR(10)
+        + '-'
+    AS VARCHAR(MAX)) AS swf_msg
+
+	FROM BS.BNK_LD_LOANS_AND_DEPOSITS A   --VW_RPT_T24_LOANS_AND_DEPOSITS
+	LEFT JOIN BS.BNK_LD_LOANS_AND_DEPOSITS_LocalRef L 
+	ON A.[@ID] = L.[@ID]
+	LEFT JOIN BS.BNK_CUSTOMER B    --[dbo].[VW_RPT_T24_CUSTOMER]
+    ON A.CUSTOMER_ID = B.[@ID]
+
+	WHERE  A.CATEGORY BETWEEN 21003 AND 21007
+    AND A.FIN_MAT_DATE > A.MIS_DATE
+	AND A.CUSTOMER_ID IN (
+		SELECT LTRIM(RTRIM(T.c.value('.', 'VARCHAR(20)')))
+		FROM (
+			SELECT CAST('<x>' + REPLACE(@listaClientes, ',', '</x><x>') + '</x>' AS XML) AS xmlData
+		) AS A
+		CROSS APPLY xmlData.nodes('/x') AS T(c)
+	)";
+
+
+    }
+}
+
+********************
+
+using Aplicacion_OutRead.DTOs;
+using Aplicacion_OutRead.Enums;
+using Aplicacion_OutRead.Interfaces;
+using MUFG_T24.Comunes;
+using MUFG_T24.Enums_utilidades;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Aplicacion_OutRead.Servicios
+{
+    public class ReglasNegocioService : IReglasNegocio
+    {
+        private readonly IAppLogger _appLogger;
+        private readonly IRecuperacionDatos<SwiftMessagesDTO> _mensajesSwift;
+        private readonly IMensajesSwift998 _mensajesSwift998;
+        private readonly IUsuariosTimeDeposits _usuariosTimeDeposits;
+
+        public ReglasNegocioService(IAppLogger appLogger, IRecuperacionDatos<SwiftMessagesDTO> mensajesSwift, IMensajesSwift998 mensajesSwift998, 
+            IUsuariosTimeDeposits usuariosTimeDeposits)
+        {
+            _appLogger = appLogger;
+            _mensajesSwift = mensajesSwift;
+            _mensajesSwift998 = mensajesSwift998;
+            _usuariosTimeDeposits = usuariosTimeDeposits;
+        }
+
+        /// <summary>
+        /// Método intermedio que obtiene el listado de todos los mensajes swift, y los envía a procesar e insertar
+        /// </summary>
+        public async Task ProcesarMensajesAsync(bool incluirBatch, CancellationToken ct)
+        {
+            try
+            {
+                var mensajes = await ObtenerMensajesAsync(incluirBatch);
+                var headersMarcados = await ProcesarEInsertarMensajesAsync(mensajes, ct);
+
+                await MarcarMensajesAsync(headersMarcados);
+            }
+            catch (Exception ex)
+            {
+                await _appLogger.ManejarErrorAsync(ex, "Error al procesar mensajes");
+            }
+        }
+
+        /// <summary>
+        /// Método que obtiene lista de mensajes SwiftT24 y Swift998, los mezcla en una sola lista
+        /// </summary>
+        private async Task<List<SwiftMessagesDTO>> ObtenerMensajesAsync(bool incluirBatch)
+        {
+            var mensajes = await _mensajesSwift.ObtenerInfoSwiftAsync() ?? new List<SwiftMessagesDTO>();
+            _appLogger.Log(TipoLog.INFO, $"existen {mensajes.Count()} mensajesT24 para procesar.");
+
+
+            if (!incluirBatch)
+                return mensajes.ToList();
+
+            try
+            {
+                var mensajes998 = await LeerMensajesSwift998Async();
+                _appLogger.Log(TipoLog.INFO, $"existen {mensajes998.Count()} mensajes998 para procesar.");
+                return mensajes.Concat(mensajes998).ToList();
+            }
+            catch (Exception ex)
+            {
+                await _appLogger.LogAsync(TipoLog.WARNING, "No se pudieron obtener mensajes 998", ex, true);
+
+                return mensajes.ToList();
+            }
+        }
+
+        /// <summary>
+        /// Método intermedio para el procesamiento de la lista de mensajes obtenidos 
+        /// </summary>
+        private async Task<Dictionary<string, string>> ProcesarEInsertarMensajesAsync(IEnumerable<SwiftMessagesDTO> mensajes, CancellationToken ct)
+        {
+            var headers = new Dictionary<string, string>();
+
+            // Validación defensiva
+            if (mensajes == null || !mensajes.Any())
+            {
+                _appLogger.Log(TipoLog.INFO, "No existen mensajes para procesar.");
+                return headers;
+            }
+
+            foreach (var message in mensajes)
+            {
+                ct.ThrowIfCancellationRequested();
+                await ProcesarMensajeAsync(message, headers);
+            }
+
+            return headers;
+        }
+
+        /// <summary>
+        /// Método que llama a MarcarMensajesSwiftT24 para marcar cada mensaje Swift
+        /// </summary>
+        private async Task MarcarMensajesAsync(Dictionary<string, string> headers)
+        {
+            if (!headers.Any())
+                return;
+
+            var procesados = await _mensajesSwift.MarcarMensajesSwiftT24(headers);
+
+            if (!procesados)
+            {
+                await _appLogger.LogAsync(TipoLog.ERROR, "No fue posible marcar los mensajes SWIFT como procesados.", generarAlerta: true);
+            }
+
+            _appLogger.Log(TipoLog.INFO, $"Headers marcados correctamente={procesados}");
+        }
+
+        /// <summary>
+        /// Método que envía los mensajes Swift998 mediante time deposits
+        /// </summary>
+        public async Task<List<SwiftMessagesDTO>> LeerMensajesSwift998Async()
+        {
+            try
+            {
+                await _appLogger.LogAsync(TipoLog.INFO, "Obteniendo parametrización cliente-swift");
+
+                var listaSwift = await _mensajesSwift998.ObtenerMensajesSwift998();
+
+                var clienteSwiftMap = new Dictionary<string, string>();
+                foreach (var parametro in listaSwift)
+                {
+                    if (clienteSwiftMap.ContainsKey(parametro.cliente))
+                    {
+                        Config.EscribirLog($"{ConstantesClaveAviso.Error}|LeerMensajesSwift998Async|El cliente '{parametro.cliente}' está duplicado en la base de datos.");
+                        continue;
+                    }
+
+                    clienteSwiftMap.Add(parametro.cliente, parametro.swift);
+                }
+
+                var listaClientes = string.Join(",", clienteSwiftMap.Keys);
+
+                var usuarios = await _usuariosTimeDeposits.ObtenerUsuariosTimeDeposits(listaClientes);
+
+                return usuarios
+                    .Select(u => MapearMensaje998(u, clienteSwiftMap))
+                    .Where(x => x != null)
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                await _appLogger.ManejarErrorAsync(ex, "Error al leer mensajes 998");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Método para formato e inserción de mensajes Swift
+        /// </summary>
+        public async Task ProcesarMensajeAsync(SwiftMessagesDTO message, Dictionary<string, string> headers)
+        {
+            if (message == null)
+                throw new ArgumentNullException(nameof(message));
+
+            if (headers == null)
+                throw new ArgumentNullException(nameof(headers));
+
+            var messageType = $"MT-{message.MESSAGE_TYPE}";
+
+            _appLogger.Log(TipoLog.INFO, $"Insertando ID={message.MSG_ID}, Header={message.HEADER_ID}, Tipo={messageType}");
+
+            var insertado = await _mensajesSwift998.InsertarMensajeSwiftAsync(message, ConstantesServicio.TipoOperacion);
+
+            if (!insertado)
+            {
+                _appLogger.Log(TipoLog.WARNING, $"Ocurrió un error al insertar el mensaje ID={message.MSG_ID}");
+                return;
+            }
+
+            ValidarTipoMensaje(messageType, message);
+
+            headers[message.HEADER_ID] = message.HEADER_ID;
+        }
+
+        /// <summary>
+        /// Método para dar formato a mensajes Swift 998
+        /// </summary>
+        private SwiftMessagesDTO MapearMensaje998(UsuarioTimeDepositDTO usuarioTD, Dictionary<string, string> clienteSwiftMap)
+        {
+            if (!clienteSwiftMap.TryGetValue(usuarioTD.customer_id, out var swift))
+            {
+                _appLogger.Log(TipoLog.WARNING, $"Cliente sin SWIFT: {usuarioTD.customer_id}");
+                return null;
+            }
+
+            swift = FormatearSwift(swift);
+
+            var folio = $"{usuarioTD.id}_{usuarioTD.date_report}";
+
+            _appLogger.Log(TipoLog.INFO, $"Alta ID {usuarioTD.id}, cliente={usuarioTD.customer_id}, swift={swift}");
+
+            return new SwiftMessagesDTO
+            {
+                HEADER_ID = folio,
+                MSG_ID = folio,
+                MESSAGE_TYPE = ConstantesServicio.MessageTypeMensajesSwift998,
+                TRANSACTION_REF = usuarioTD.id,
+                SWIFT_SENDER = ConstantesServicio.T24_Swift_MX_Addr,
+                SWIFT_RECEIVER = swift,
+                SWIFT_MSG = usuarioTD.swf_msg,
+                T24_MSG = ConstruirMensaje(usuarioTD.swf_msg, swift)
+            };
+        }
+
+        /// <summary>
+        /// Método para validar el tipo de mensaje 
+        /// </summary>
+        public void ValidarTipoMensaje(string messageType, SwiftMessagesDTO message)
+        {
+            if (!messageType.Equals(ConstantesServicio.MessageTypeKeySwift998))
+            {
+                _appLogger.Log(TipoLog.WARNING, $"Error al intentar marcar la operación swift_out como terminada en T24 Message: {messageType}, ID={message.MSG_ID}");
+            }
+        }
+
+        /// <summary>
+        /// Método que formatea el valor de swift para LeerMensajesSwift998
+        /// </summary>
+        private string FormatearSwift(string swift)
+        {
+            if (string.IsNullOrWhiteSpace(swift))
+                return string.Empty;
+
+            if (swift.Length == 11)
+                swift = swift.Insert(8, "A");
+
+            return swift.PadRight(12, 'X');
+        }
+
+        /// <summary>
+        /// Método que genera string para lista de mensajes Swift 998
+        /// </summary>
+        private string ConstruirMensaje(string swfMsg, string swift)
+        {
+            return $@"{{1:{ConstantesServicio.SecuenciaMensajeT24}.SN...ISN.}}{{2:I998{swift}N}}{{3:{{108:xxxxx}}}}{{4:{swfMsg}}}";
+        }
+    }
+}
+***********************
+using Aplicacion_OutRead.DTOs;
+using Aplicacion_OutRead.Enums;
+using Aplicacion_OutRead.Interfaces;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using IOperacionServicio = Aplicacion_OutRead.Interfaces.IOperacionServicio;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using System.Globalization;
+
+namespace Aplicacion_OutRead
+{
+    /// <summary>
+    /// Clase que contiene el flujo principal del procesamiento (equivalente a Definiciones).
+    /// </summary>
+    public class OperacionServicio : IOperacionServicio
+    {
+        private readonly Configuracion _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IParametrizacion _parametrizacion;
+        private readonly IAppLogger _appLogger;
+        private readonly IReglasNegocio _reglasNegocio;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public OperacionServicio(Configuracion configuracion, IControlServicio controlServicio, IParametrizacion parametrizacion, IAppLogger appLogger, 
+            IReglasNegocio reglasNegocio)
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _parametrizacion = parametrizacion;
+            _appLogger = appLogger;
+            _reglasNegocio = reglasNegocio;
+        }
+
+        /// <summary>
+        /// Control del flujo principal del procesamiento.
+        /// </summary>
+        public async Task<bool> EjecutarProcedimientosAsync(CancellationToken ct)
+        {
+            try
+            {
+                await _controlServicio.ActualizaEJecucion(_configuracion.NombreServicio);
+
+                await CargarConfiguracionAsync();
+
+                var (ejecutar, getMtBatch) = await DebeEjecutarOperacionesAsync();
+                if (!ejecutar)
+                    return false;
+
+                await _reglasNegocio.ProcesarMensajesAsync(getMtBatch, ct);
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                await _appLogger.ManejarErrorAsync(ex, "Error en ejecución");
+                return false;
+            }
+            finally
+            {
+                await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio);
+            }
+        }
+
+        /// <summary>
+        /// Se cargan las principales configuraciones del sistema.
+        /// </summary>
+        private async Task CargarConfiguracionAsync()
+        {
+            _configuracion.FechaSistema = await _parametrizacion.ObtenerFechaSistemaAsync();
+            _configuracion.ParametrosSistema = await _parametrizacion.ObtenerParametrosSistemaAsync(ConstantesServicio.ParametrosSistema);
+        }
+
+        /// <summary>
+        /// Se evalua si se ejecutan las operaciones.
+        /// </summary>
+        private async Task<(bool ejecutar, bool getMtBatch)> DebeEjecutarOperacionesAsync()
+        {
+            var parametros = _configuracion.ParametrosSistema;
+            bool getMtBatch = ParseBool(parametros[ConstantesServicio.SWFOutGetMtBatch]);
+            _appLogger.Log(TipoLog.INFO, $"valor de getMtBatch: { getMtBatch }");
+
+            if (getMtBatch)
+                return (true, true);
+
+            string horaInicioOperaciones = parametros[ConstantesServicio.HoraInicioRead];
+            string horaFinOperaciones = parametros[ConstantesServicio.HoraFinRead];
+            bool ejecuta = await EsDiaYHoraValidaAsync(horaInicioOperaciones, horaFinOperaciones);
+
+            return (ejecuta, false);
+        }
+
+        /// <summary>
+        /// Evalua la cadena como posible valor booleano.
+        /// </summary>
+        private bool ParseBool(string valor)
+        {
+            if (string.IsNullOrWhiteSpace(valor))
+                return false;
+
+            return valor == "1" || valor.Equals("true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Evalúa los parámetros de día hábil y horario de operación.
+        /// </summary>
+        private async Task<bool> EsDiaYHoraValidaAsync(string horaInicioOperaciones, string horaFinOperaciones)
+        {
+            if (!await ValidarDiaHabilAsync())
+                return false;
+
+            return await ValidarHorarioOperacionAsync(horaInicioOperaciones, horaFinOperaciones);
+        }
+
+        /// <summary>
+        /// Evalúa si es día hábil.
+        /// </summary>
+        public async Task<bool> ValidarDiaHabilAsync()
+        {
+            _configuracion.EsDiaHabil = await _controlServicio.EsDiaHabil();
+
+            //Valida que sea día hábil...
+            if (!_configuracion.EsDiaHabil.Value)
+            {
+                await _appLogger.LogAsync(
+                            TipoLog.WARNING,
+                            "Hoy es un día inhábil.",
+                            generarAlerta: true,
+                            claveAviso: ConstantesClaveAviso.Error
+                        );
+
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Evalúa el horario de operación.
+        /// </summary>
+        public async Task<bool> ValidarHorarioOperacionAsync(string horaInicioOperaciones, string horaFinOperaciones)
+        {
+            //Valida el horario de operación...
+            TimeSpan timeHoraSistema = _parametrizacion.ObtenerHoraSistema();
+
+            if (!TimeSpan.TryParse(horaInicioOperaciones, CultureInfo.InvariantCulture, out var horaIniValidada)
+                || !TimeSpan.TryParse(horaFinOperaciones, CultureInfo.InvariantCulture, out var horaFinValidada))
+            {
+                await _appLogger.LogAsync(
+                            TipoLog.WARNING,
+                            $"Formato de horario inválido.",
+                            generarAlerta: true,
+                            claveAviso: ConstantesClaveAviso.Error
+                        );
+
+                return false;
+            }
+
+            bool dentroHorario = horaIniValidada <= horaFinValidada
+                ? timeHoraSistema >= horaIniValidada && timeHoraSistema <= horaFinValidada
+                : timeHoraSistema >= horaIniValidada || timeHoraSistema <= horaFinValidada;
+
+            if (!dentroHorario)
+            {
+                await _appLogger.LogAsync(
+                            TipoLog.WARNING,
+                            $"El servicio '{_configuracion.NombreServicio}' está fuera de horario.",
+                            generarAlerta: true,
+                            claveAviso: ConstantesClaveAviso.Error
+                        );
+
+                return false;
+            }
+
+            return true;
+        }
+    }
+}
+
+***************
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Conexiones;
+using MUFG_T24.Core.DTOs.T24;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios.T24;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Globalization;
+using System.Linq;
+using System.Security.Cryptography;
+using System.ServiceModel;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using static MUFG_T24.Modelos.CalypsoMwRespuesta;
+
+namespace MUFG_T24.Repositorios
+{
+    /// <summary>
+    /// Representa ConexionT24Mw.
+    /// </summary>
+    public class ConexionT24Mw : RepositorioMaestro
+    {
+        private readonly T24MwEnd2End _end2End;
+        private readonly T24MwForex _forex;
+        private readonly T24MwSpid _spid;
+        private readonly T24MwSwift _swift;
+        private readonly T24MwOfsTrx _ofsTrx;
+        private readonly T24MwVistas _vistas;
+        private readonly T24MwOperaciones _operaciones;
+
+        public string Clave_CASFIM = "40108";
+        public string MonedaDefaultMN = "MXN";
+        public string T24_BanxicoAcct = "5990060";
+        public string T24_TEF_Acct = "MXN174020001";
+        public string T24_Banxico_USD_Acct = "5990170";
+        public string T24_SAT_Acct = "2300001";
+        public string T24_Swift_MX_Addr = "BOTKMXMX";
+        public string T24_MUFG_CDL = "24771";
+        public string MW_DateFormat = "yyyy-MM-dd";
+        public string MW_DateTimeFormat = "yyyy-MM-dd HH:mm:ss";
+        public string MW_SeparadorMultivalor = "|";
+
+        /// <summary>
+        /// Inicializa una nueva instancia de ConexionT24Mw.
+        /// </summary>
+        public ConexionT24Mw(
+            BasedatosProveedor proveedor,
+            NombreBasedatos nombreBasedatos,
+            BasedatosProveedor? proveedorVistasT24,
+            NombreBasedatos? nombreBasedatosVistasT24)
+            : base(proveedor, nombreBasedatos, proveedorVistasT24, nombreBasedatosVistasT24)
+        {
+            _operaciones = new T24MwOperaciones(
+                basedatosConexion,
+                (sp, parametros, esVistasT24) => EjecutarStoredProcedureQuery<OperacionesEntidad>(sp, parametros, esVistasT24),
+                (sp, parametros) => EjecutarStoredProcedureQuery<MW_Tipo_operacion>(sp, parametros),
+                (sp, parametros) => EjecutarStoredProceduredNonQuery(sp, parametros));
+
+            _end2End = new T24MwEnd2End(
+                basedatosConexion,
+                (sp, parametros) => EjecutarStoredProcedureQuery<OperacionesEntidad>(sp, parametros),
+                (sp, parametros) => EjecutarStoredProceduredNonQuery(sp, parametros));
+
+            _forex = new T24MwForex(
+                basedatosConexion,
+                (sp, parametros) => EjecutarStoredProcedureQuery<SolicitudesForexEntidad>(sp, parametros),
+                ValidaMoneda);
+
+            _spid = new T24MwSpid(
+                basedatosConexion,
+                (sp, parametros) => EjecutarStoredProcedureQuery<SpidValidacionEntidad>(sp, parametros));
+
+            _swift = new T24MwSwift(
+                basedatosConexion,
+                basedatosConexionVistasT24,
+                (sp) => EjecutarStoredProcedureQuery<object>(sp),
+                (sp) => EjecutarStoredProcedureQuery<MensajesSwfT24Entidad>(sp, esVistasT24: true),
+                (sp, parametros) => EjecutarStoredProcedureQuery<IntercambioEntidad>(sp, parametros),
+                (sp, parametros) => EjecutarStoredProceduredNonQuery(sp, parametros, esVistasT24: true));
+
+            _ofsTrx = new T24MwOfsTrx(
+                basedatosConexion,
+                basedatosConexionVistasT24,
+                (sp, parametros, esVistasT24) => EjecutarStoredProcedureQuery<OperacionesEntidad>(sp, parametros, esVistasT24),
+                (sp, parametros, esVistasT24) => EjecutarStoredProcedureQuery<MwT24TrxMaestro>(sp, parametros, esVistasT24),
+                (sp, parametros) => EjecutarStoredProcedureQuery<T24MwVersionConfigDto>(sp, parametros),
+                (sp, parametros) => EjecutarStoredProcedureQuery<T24MwVersionDefaultDto>(sp, parametros),
+                (sp, parametros, esVistasT24) => EjecutarStoredProceduredNonQuery(sp, parametros, esVistasT24),
+                ExisteRegistro,
+                InsertaRegistroConResultado,
+                _operaciones.ObtenerEntradaSalidaDesdeFolio);
+
+            _vistas = new T24MwVistas(
+                basedatosConexion,
+                basedatosConexionVistasT24,
+                (sp, parametros, esVistasT24) => EjecutarStoredProcedureQuery<OperacionesEntidad>(sp, parametros, esVistasT24),
+                (sp, parametros, esVistasT24) => EjecutarStoredProcedureQuery<CuentaClienteT24>(sp, parametros, esVistasT24),
+                (sp, parametros, esVistasT24) => EjecutarStoredProcedureQuery<MwT24TrxDetalle>(sp, parametros, esVistasT24));
+        }
+
+        /// <summary>
+        /// Obtiene operaciones T24
+        /// </summary>
+        /// <returns>Dictionary<string, OperacionesEntidad></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<Dictionary<string, OperacionesEntidad>> ObtieneOperacionesMwT24()
+        {
+            return await _operaciones.ObtieneOperacionesMwT24();
+        }
+
+        /// <summary>
+        /// Obtiene datos de cuentas FAD
+        /// Legacy: T24_FAD_Account
+        /// </summary>
+        /// <returns>List<OperacionesEntidad></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<List<OperacionesEntidad>> ObtieneDatosCuentasFad()
+        {
+            return await _operaciones.ObtieneDatosCuentasFad();
+        }
+
+        /// <summary>
+        /// Obtiene datos de cuentas NOSTRO
+        /// </summary>
+        /// <returns>List<OperacionesEntidad></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<List<OperacionesEntidad>> ObtieneDatosCuentasNostro()
+        {
+            return await _operaciones.ObtieneDatosCuentasNostro();
+        }
+
+        /// <summary>
+        /// Obtiene datos de cuentas SWF OUT
+        /// </summary>
+        /// <returns>List<OperacionesEntidad></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<List<OperacionesEntidad>> ObtieneDatosSwfOutDestino()
+        {
+            return await _operaciones.ObtieneDatosSwfOutDestino();
+        }
+
+        /// <summary>
+        /// Genera un folio unico para OperacionesT24
+        /// </summary>
+        /// <param name="tipoOperacion"></param>
+        /// <param name="fechaJuliana"></param>
+        /// <param name="folio"></param>
+        /// <param name="longitudFoli"></param>
+        /// <returns>string</returns>
+        /// <exception cref="KeyNotFoundException"></exception>
+        public async Task<string> GeneraFolioUnico(string tipoOperacion, string fechaJuliana, string folio, int longitudFoli = 8)
+        {
+            return await _operaciones.GeneraFolioUnico(tipoOperacion, fechaJuliana, folio, longitudFoli);
+        }
+
+        /// <summary>
+        /// Genera un folio unico para OperacionesT24 con origen y tipo
+        /// </summary>
+        /// <param name="origen"></param>
+        /// <param name="tipo"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <param name="fechaJuliana"></param>
+        /// <param name="folio"></param>
+        /// <param name="longitudFoli"></param>
+        /// <returns>string</returns>
+        /// <exception cref="KeyNotFoundException"></exception>
+        public async Task<string> GeneraFolioUnico(string origen, string tipo, string tipoOperacion, string fechaJuliana,
+                                     string folio, int longitudFoli = 16)
+        {
+            return await _operaciones.GeneraFolioUnico(origen, tipo, tipoOperacion, fechaJuliana, folio, longitudFoli);
+        }
+
+        /// <summary>
+        /// Valida sw End2End
+        /// </summary>
+        /// <param name="swEnd2EndRef"></param>
+        /// <returns>true/false</returns>
+        public bool EsSwEnd2EndRefValida(string swEnd2EndRef)
+        {
+            return _end2End.EsSwEnd2EndRefValida(swEnd2EndRef);
+        }
+
+        /// <summary>
+        /// Genera sw End2End
+        /// </summary>
+        /// <param name="slaUetr"></param>
+        /// <param name="referenciaT24"></param>
+        /// <param name="folioUnico"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <param name="folioOperacion"></param>
+        /// <param name="swiftInOut"></param>
+        /// <param name="folioSwift"></param>
+        /// <param name="claveMensaje"></param>
+        /// <returns>string</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<string> GeneraSwEnd2EndRef(string slaUetr, string referenciaT24, string folioUnico,
+                                         string tipoOperacion, string folioOperacion, string swiftInOut,
+                                         string folioSwift, string claveMensaje)
+        {
+            return await _end2End.GeneraSwEnd2EndRef(
+                slaUetr,
+                referenciaT24,
+                folioUnico,
+                tipoOperacion,
+                folioOperacion,
+                swiftInOut,
+                folioSwift,
+                claveMensaje);
+        }
+
+        #region BUSCA, INSERTA Y ACTUALIZA END2END
+
+        /// <summary>
+        /// Busca sw End2End
+        /// </summary>
+        /// <param name="swEnd2EndRef"></param>
+        /// <param name="referenciaT24"></param>
+        /// <param name="folioUnico"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <param name="folioOperacion"></param>
+        /// <param name="swiftInOut"></param>
+        /// <param name="folioSwift"></param>
+        /// <returns>string</returns>
+        public async Task<string> BuscaSwEnd2EndRef(string swEnd2EndRef, string referenciaT24, string folioUnico,
+                                         string tipoOperacion, string folioOperacion, string swiftInOut,
+                                         string folioSwift)
+        {
+            return await _end2End.BuscaSwEnd2EndRef(
+                swEnd2EndRef,
+                referenciaT24,
+                folioUnico,
+                tipoOperacion,
+                folioOperacion,
+                swiftInOut,
+                folioSwift);
+        }
+
+        /// <summary>
+        /// Inserta sw End2End
+        /// </summary>
+        /// <param name="swEnd2EndRef"></param>
+        /// <param name="slaUetr"></param>
+        /// <param name="referenciaT24"></param>
+        /// <param name="folioUnico"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <param name="folioOperacion"></param>
+        /// <param name="swiftInOut"></param>
+        /// <param name="folioSwift"></param>
+        /// <returns>true/false</returns>
+        public async Task<bool> InsertaSwEnd2EndRef(string swEnd2EndRef, string slaUetr, string referenciaT24, string folioUnico,
+                                         string tipoOperacion, string folioOperacion, string swiftInOut,
+                                         string folioSwift)
+        {
+            return await _end2End.InsertaSwEnd2EndRef(
+                swEnd2EndRef,
+                slaUetr,
+                referenciaT24,
+                folioUnico,
+                tipoOperacion,
+                folioOperacion,
+                swiftInOut,
+                folioSwift);
+        }
+
+        /// <summary>
+        /// Actualiza llave sw End2End
+        /// </summary>
+        /// <param name="swEnd2EndRef"></param>
+        /// <param name="referenciaT24"></param>
+        /// <param name="folioUnico"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <param name="folioOperacion"></param>
+        /// <param name="swiftInOut"></param>
+        /// <param name="folioSwift"></param>
+        /// <returns>true/false</returns>
+        public async Task<bool> ActualizaSwEnd2EndRef(string swEnd2EndRef, string referenciaT24, string folioUnico,
+                                         string tipoOperacion, string folioOperacion, string swiftInOut,
+                                         string folioSwift)
+        {
+            return await _end2End.ActualizaSwEnd2EndRef(
+                swEnd2EndRef,
+                referenciaT24,
+                folioUnico,
+                tipoOperacion,
+                folioOperacion,
+                swiftInOut,
+                folioSwift);
+        }
+
+        #endregion BUSCA, INSERTA Y ACTUALIZA END2END
+
+        /// <summary>
+        /// Convierte texto a fecha juliana
+        /// </summary>
+        /// <param name="textoFecha"></param>
+        /// <returns>string</returns>
+        /// <exception cref="ArgumentException"></exception>
+        public static string CambiarFechaAJulianaT24(string textoFecha)
+        {
+            return T24MwOperaciones.CambiarFechaAJulianaT24(textoFecha);
+        }
+
+        /// <summary>
+        /// Obtiene fecha juliana con formato [yy]yyDDD a yyyyMMdd
+        /// </summary>
+        /// <param name="fechaJuliana"></param>
+        /// <returns>string</returns>
+        /// <exception cref="ArgumentException"></exception>
+        public string CambiaJulianaAFecha(string fechaJuliana)
+        {
+            return _operaciones.CambiaJulianaAFecha(fechaJuliana);
+        }
+
+        /// <summary>
+        /// Valida el tipo de moneda MXN
+        /// Legacy: valida_moneda
+        /// </summary>
+        /// <param name="moneda"></param>
+        /// <returns>string</returns>
+        public string ValidaMoneda(string moneda)
+        {
+            return _operaciones.ValidaMoneda(moneda);
+        }
+
+        /// <summary>
+        /// Valida y obtiene cuenta MUFG
+        /// </summary>
+        /// <param name="cuenta"></param>
+        /// <returns></returns>
+        public string DameCuentaMufg(string cuenta)
+        {
+            return _operaciones.DameCuentaMufg(cuenta);
+        }
+
+        /// <summary>
+        /// Obtiene fecha juliana de T24
+        /// </summary>
+        /// <returns>string</returns>
+        public async Task<string> ObtenerFechaJuliana()
+        {
+            return await _operaciones.ObtenerFechaJuliana();
+        }
+
+        /// <summary>
+        /// Obtiene folio asignado
+        /// </summary>
+        /// <param name="folioUnico"></param>
+        /// <returns>string</returns>
+        public async Task<string> ObtenerFolioAsignado(string folioUnico)
+        {
+            return await _operaciones.ObtenerFolioAsignado(folioUnico);
+        }
+
+        /// <summary>
+        /// Valida si existe registro
+        /// </summary>
+        /// <param name="folioUnico"></param>
+        /// <param name="registroEncontrado"></param>
+        /// <returns>true/false</returns>
+        public async Task<OperacionesEntidad> ExisteRegistro(string folioUnico)
+        {
+            return await _operaciones.ExisteRegistro(folioUnico);
+        }
+
+        /// <summary>
+        /// Genera presupuesto
+        /// </summary>
+        /// <param name="folioUnico"></param>
+        /// <param name="fechaJulianaT24"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <returns>string</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<string> GeneraFolioPresupuesto(string folioUnico, int fechaJulianaT24, string tipoOperacion)
+        {
+            return await _operaciones.GeneraFolioPresupuesto(folioUnico, fechaJulianaT24, tipoOperacion);
+        }
+
+        /// <summary>
+        /// Inserta registro del folio
+        /// </summary>
+        /// <param name="folioUnico"></param>
+        /// <param name="fechaJulianaT24"></param>
+        /// <param name="entradaSalida"></param>
+        /// <param name="folio"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <returns>string</returns>
+        public async Task<string> InsertaRegistro(string folioUnico, int fechaJulianaT24, char entradaSalida, string tipoOperacion)
+        {
+            return await _operaciones.InsertaRegistro(folioUnico, fechaJulianaT24, entradaSalida, tipoOperacion);
+        }
+
+        public async Task<StoredProcedureResult> InsertaRegistroConResultado(string folioUnico, int fechaJulianaT24, char entradaSalida, string tipoOperacion)
+        {
+            return await _operaciones.InsertaRegistroConResultado(folioUnico, fechaJulianaT24, entradaSalida, tipoOperacion);
+        }
+
+        /// <summary>
+        /// Valida operacion, inserta registro de operacion, obtiene esquema comision, genera OFS
+        /// </summary>
+        /// <param name="folioUnico"></param>
+        /// <param name="fechaJulianaT24"></param>
+        /// <param name="tabla"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <param name="folio"></param>
+        /// <param name="operacionId"></param>
+        /// <param name="trxDetalle"></param>
+        /// <param name="trxMaestro"></param>
+        /// <returns>true/false</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<bool> RegistraTrx(string folioUnico, int fechaJulianaT24, string tabla, string tipoOperacion, string folio, string operacionId,
+            MwT24TrxDetalle trxDetalle, MwT24TrxMaestro trxMaestro)
+        {
+            return await _ofsTrx.RegistraTrx(folioUnico, fechaJulianaT24, tabla, tipoOperacion, folio, operacionId, trxDetalle, trxMaestro);
+        }
+
+        /// <summary>
+        /// Generación del OFS 
+        /// </summary>
+        /// <param name="tipoOfs"></param>
+        /// <param name="tablaTrabajo"></param>
+        /// <param name="folio"></param>
+        /// <param name="trxDetalle"></param>
+        /// <param name="trxMaestro"></param>
+        /// <returns>string</returns>
+        public async Task<string> GeneraOfs(
+            string tipoOfs,
+            string tablaTrabajo,
+            string folio,
+            MwT24TrxDetalle trxDetalle,
+            MwT24TrxMaestro trxMaestro)
+        {
+            return await _ofsTrx.GeneraOfs(tipoOfs, tablaTrabajo, folio, trxDetalle, trxMaestro);
+        }
+
+        /// <summary>
+        /// Inicializa una nueva instancia de OfsEspecialChar.
+        /// </summary>
+        public string OfsEspecialChar(string texto)
+        {
+            return _ofsTrx.OfsEspecialChar(texto);
+        }
+
+        /// <summary>
+        /// Consideraciones al cortar el texto:
+        /// No puede iniciar ninguna linea con - (marca error)
+        /// De preferencia cortar el texto entre letras, si corta en espacios al "unirlo" en T24 lo juntará  omitirá el espacio.
+        /// </summary>
+        /// <param name="texto"></param>
+        /// <param name="longitudSeparadorMultivalor"></param>
+        /// <returns>string</returns>
+        public string ConvierteTextoAMultivalor(string texto, int longitudSeparadorMultivalor)
+        {
+            return _ofsTrx.ConvierteTextoAMultivalor(texto, longitudSeparadorMultivalor);
+        }
+
+        /// <summary>
+        /// Formatea fecha
+        /// </summary>
+        /// <param name="fechaValor"></param>
+        /// <returns>string</returns>
+        public string FechaT24(DateTime fechaValor) => _ofsTrx.FechaT24(fechaValor);
+
+        /// <summary>
+        /// Esquema de comision o sin esquema de comisiones (la función actualiza TrxOperation_ID, TrxInternal_Type y TrxTransaction_Type)
+        /// </summary>
+        /// <param name="trxMaestro"></param>
+        /// <returns>MwT24TrxMaestro</returns>
+        public async Task<MwT24TrxMaestro> BuscarEsquemaTrx(MwT24TrxMaestro trxMaestro)
+        {
+            return await _ofsTrx.BuscarEsquemaTrx(trxMaestro);
+        }
+
+        /// <summary>
+        /// Prepara DT para mensajes swift
+        /// </summary>
+        /// <returns>DataTable</returns>
+        public DataTable PreparaTablaSwf()
+        {
+            return _swift.PreparaTablaSwf();
+        }
+
+        /// <summary>
+        /// Devuelve un DataTable de mensajes swift de T24
+        /// </summary>
+        /// <returns>DataTable</returns>
+        public async Task<DataTable> LeerMensajesSwfT24()
+        {
+            return await _swift.LeerMensajesSwfT24();
+        }
+
+        /// <summary>
+        /// Marca el mensaje swfT24
+        /// </summary>
+        /// <param name="swfHeadersId"></param>
+        /// <returns>true/false</returns>
+        public async Task<bool> MarcaMensajesSwfT24(Dictionary<string, string> swfHeadersId)
+        {
+            return await _swift.MarcaMensajesSwfT24(swfHeadersId, CancellationToken.None);
+        }
+
+        public async Task<bool> MarcaMensajesSwfT24(Dictionary<string, string> swfHeadersId, CancellationToken ct)
+        {
+            return await _swift.MarcaMensajesSwfT24(swfHeadersId, ct);
+        }
+
+        /// <summary>
+        /// Validación de la cuenta SPID x cdl (validación de FIEL y Accionistas)
+        /// </summary>
+        /// <param name="cdl"></param>
+        /// <param name="mensaje"></param>
+        /// <returns>true/false</returns>
+        public async Task<EsClienteSpidValidoResultado> EsClienteSpidValido(string cdl, string mensaje)
+        {
+            return await _spid.EsClienteSpidValido(cdl);
+        }
+
+        /// <summary>
+        /// ObtenerFechaJuliana
+        /// </summary>
+        public async Task<string> ObtenerFechaJuliana5digitos()
+        {
+            return await _vistas.ObtenerFechaJuliana5digitos();
+        }
+
+        /// <summary>
+        /// Validación de la cuenta SPID x cdl (validación de FIEL y Accionistas)
+        /// </summary>
+        /// <param name="cuenta"></param>
+        /// <param name="mensaje"></param>
+        /// <param name="cdl"></param>
+        /// <returns>true/false</returns>
+        public async Task<EsClienteSpidValidoResultado> EsCuentaSpidValida(string cuenta, string mensaje, string cdl = "")
+        {
+            return await _spid.EsCuentaSpidValida(cuenta, mensaje, cdl);
+        }
+
+        /// <summary>
+        /// Obtiene datos de cuentas del clientes en T24
+        /// </summary>
+        /// <param name="cliente"></param>
+        /// <returns>DataTable</returns>
+        public async Task<DataTable> DatosClienteCuentasVw(string cliente = null, string cuenta = null)
+        {
+            return await _vistas.DatosClienteCuentasVw(cliente, cuenta);
+        }
+
+        /// <summary>
+        /// Obtiene datos del cliente en T24 !!!!!! MAL, no es datos_cliente_VW
+        /// Es datos_cuenta_VW
+        /// </summary>
+        public async Task<DataTable> DatosClienteVw(string codigoCliente)
+        {
+            return await _vistas.DatosClienteVw(codigoCliente);
+        }
+        /// <summary>
+        /// Inicializa una nueva instancia de DatosCuentaVw.
+        /// </summary>
+        public async Task<DataTable> DatosCuentaVw(string codigoCliente)
+        {
+            return await _vistas.DatosCuentaVw(codigoCliente);
+        }
+
+        /// <summary>
+        /// datos_cliente_VW
+        /// </summary>
+        /// <param name="cliente"></param>
+        /// <returns></returns>
+        public async Task<DataTable> DatosClienteVw2(string cliente)
+        {
+            return await _vistas.DatosClienteVw2(cliente);
+        }
+
+        /// <summary>
+        /// Obtiene datos de direcciones del cliente en T24
+        /// </summary>
+        /// <param name="cliente"></param>
+        /// <returns>List<T></returns>
+        public async Task<List<CuentaClienteT24>> ObtieneDireccionClienteVw(string cliente)
+        {
+            return await _vistas.ObtieneDireccionClienteVw(cliente);
+        }
+
+        /// <summary>
+        /// Lee FT de T24
+        /// </summary>
+        /// <param name="folioT24"></param>
+        /// <param name="inau"></param>
+        /// <returns>MwT24TrxDetalle</returns>
+        public async Task<MwT24TrxDetalle> LecturaFtT24Vw(string folioT24, bool inau)
+        {
+            return await _vistas.LecturaFtT24Vw(folioT24, inau);
+        }
+
+        /// <summary>
+        /// Obtiene fondos tranferencia si existe
+        /// </summary>
+        /// <param name="folioT24"></param>
+        /// <returns>MwT24TrxDetalle</returns>
+        public async Task<MwT24TrxDetalle> ExisteT24Vw(string folioT24)
+        {
+            return await _vistas.ExisteT24Vw(folioT24);
+
+        }
+
+        /// <summary>
+        /// Valida estatus FOREX
+        /// LLegacy: validaEstatus_Forex
+        /// </summary>
+        public async Task<ValidacionForexResultado> ValidaEstatusForex(string forexTipoYNuemro)
+        {
+            return await _forex.ValidaEstatusForex(forexTipoYNuemro);
+        }
+
+        /// <summary>
+        /// Valida datos FOREX
+        /// Legacy: validaDatos_Forex
+        /// </summary>
+        public async Task<ValidacionForexResultado> ValidaDatosForex(string forexTipoYNuemro, string divisa, string cuenta, decimal monto, string sentido)
+        {
+            return await _forex.ValidaDatosForex(forexTipoYNuemro, divisa, cuenta, monto, sentido);
+        }
+        
+        /// <summary>
+        /// Inicializa una nueva instancia de ObtenerMWDatosOperacion.
+        /// </summary>
+        public async Task<MW_Tipo_operacion> ObtenerMWDatosOperacion(string tipoOperacion)
+        {
+            return await _operaciones.ObtenerMWDatosOperacion(tipoOperacion);
+        }
+
+    }
+
+}
+********
+using MUFG_T24.Comunes;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace MUFG_T24.Repositorios.T24
+{
+    internal sealed class T24MwSwift
+    {
+        private readonly IBasedatosConexion _basedatosConexion;
+        private readonly IBasedatosConexion _basedatosConexionVistasT24;
+        private readonly Func<string, Task<StoredProcedureResult<object>>> _ejecutarQueryObject;
+        private readonly Func<string, Task<StoredProcedureResult<MensajesSwfT24Entidad>>> _ejecutarQueryMensajes;
+        private readonly Func<string, Action<IDbCommand>, Task<StoredProcedureResult<IntercambioEntidad>>> _ejecutarQueryIntercambio;
+        private readonly Func<string, Action<IDbCommand>, Task<StoredProcedureResult>> _ejecutarNonQueryVistas;
+
+        public T24MwSwift(
+            IBasedatosConexion basedatosConexion,
+            IBasedatosConexion basedatosConexionVistasT24,
+            Func<string, Task<StoredProcedureResult<object>>> ejecutarQueryObject,
+            Func<string, Task<StoredProcedureResult<MensajesSwfT24Entidad>>> ejecutarQueryMensajes,
+            Func<string, Action<IDbCommand>, Task<StoredProcedureResult<IntercambioEntidad>>> ejecutarQueryIntercambio,
+            Func<string, Action<IDbCommand>, Task<StoredProcedureResult>> ejecutarNonQueryVistas)
+        {
+            _basedatosConexion = basedatosConexion;
+            _basedatosConexionVistasT24 = basedatosConexionVistasT24;
+            _ejecutarQueryObject = ejecutarQueryObject;
+            _ejecutarQueryMensajes = ejecutarQueryMensajes;
+            _ejecutarQueryIntercambio = ejecutarQueryIntercambio;
+            _ejecutarNonQueryVistas = ejecutarNonQueryVistas;
+        }
+
+        public DataTable PreparaTablaSwf()
+        {
+            DataTable dtRegreso = new DataTable();
+
+            dtRegreso.Columns.Add("HEADER_ID", typeof(string));
+            dtRegreso.Columns.Add("MSG_ID", typeof(string));
+            dtRegreso.Columns.Add("MESSAGE_TYPE", typeof(string));
+            dtRegreso.Columns.Add("TRANSACTION_REF", typeof(string));
+            dtRegreso.Columns.Add("SWIFT_SENDER", typeof(string));
+            dtRegreso.Columns.Add("SWIFT_RECEIVER", typeof(string));
+            dtRegreso.Columns.Add("SWIFT_MSG", typeof(string));
+            dtRegreso.Columns.Add("T24_MSG", typeof(string));
+            return dtRegreso;
+        }
+
+        public async Task<DataTable> LeerMensajesSwfT24()
+        {
+            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|Comunes.Lee_mensajes_T24|Inicia la lectura de SWIFT.");
+
+            DataTable dtRegreso = PreparaTablaSwf();
+
+            StoredProcedureResult<MensajesSwfT24Entidad> resultadoSp =
+                await _ejecutarQueryMensajes(EnumNombreSp.SP_VW_T24_SWF_MESSAGES);
+
+            if (resultadoSp.Data == null || !resultadoSp.Data.Any())
+            {
+                return dtRegreso;
+            }
+
+            foreach (MensajesSwfT24Entidad swfT24 in resultadoSp.Data)
+            {
+                DataRow row = dtRegreso.NewRow();
+
+                row["HEADER_ID"] = swfT24.HEADER_ID;
+                row["MSG_ID"] = swfT24.MSG_ID;
+                row["MESSAGE_TYPE"] = swfT24.MESSAGE_TYPE;
+                row["TRANSACTION_REF"] = swfT24.TRANSACTION_REF;
+                row["SWIFT_SENDER"] = swfT24.CIF_SENDER;
+                row["SWIFT_RECEIVER"] = swfT24.BANCO_RECEPTOR;
+                row["T24_MSG"] = swfT24.MT_MSG;
+
+                string msj = swfT24.MESSAGE_TXT;
+                if (msj.EndsWith("}"))
+                    msj = msj.Substring(0, msj.Length - 1);
+
+                row["SWIFT_MSG"] = msj;
+                dtRegreso.Rows.Add(row);
+            }
+
+            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|Comunes.lee_mensajes_swift_T24|Rows.Count= {resultadoSp.Data.Count}.");
+            return dtRegreso;
+        }
+
+        public Task<bool> MarcaMensajesSwfT24(Dictionary<string, string> swfHeadersId)
+        {
+            return MarcaMensajesSwfT24(swfHeadersId, CancellationToken.None);
+        }
+
+        public async Task<bool> MarcaMensajesSwfT24(Dictionary<string, string> swfHeadersId, CancellationToken ct)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (swfHeadersId == null || swfHeadersId.Count == 0)
+                    return false;
+
+                object resultadoFecha = (await _ejecutarQueryObject(EnumNombreSp.SP_FECHA_SERVIDOR)).Data.FirstOrDefault();
+
+                if (resultadoFecha == null)
+                    return false;
+
+                if (!DateTime.TryParse(resultadoFecha.ToString(), out DateTime fechaBase))
+                    return false;
+
+                string fechabase = fechaBase.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|Comunes.marca_mensajes_swift_T24|Inicio ciclo en fecha y hora de BD = '{fechabase}'.");
+
+                foreach (KeyValuePair<string, string> headerId in swfHeadersId)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    try
+                    {
+                        string doh = "DOH";
+                        string swiftHeaderId = headerId.Key;
+                        string msjId = $"{doh}.{swiftHeaderId}";
+                        string ofs = $"DE.O.HEADER,BTM.STATUS.UPD/I/PROCESS,,{swiftHeaderId},STP.STATUS:1:1=MQ";
+
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|Comunes.marca_mensajes_swift_T24|A intentar marcar el mensaje Swift Header ID '{swiftHeaderId}' como realizado.");
+
+                        await _ejecutarNonQueryVistas(EnumNombreSp.SP_T24_ADD_TRX, cmd =>
+                        {
+                            cmd.Parameters.Add(_basedatosConexionVistasT24.CrearParametro("@folio", msjId));
+                            cmd.Parameters.Add(_basedatosConexionVistasT24.CrearParametro("@trans_source", doh));
+                            cmd.Parameters.Add(_basedatosConexionVistasT24.CrearParametro("@trans_id", swiftHeaderId));
+                            cmd.Parameters.Add(_basedatosConexionVistasT24.CrearParametro("@folio_unico", string.Empty));
+                            cmd.Parameters.Add(_basedatosConexionVistasT24.CrearParametro("@ofs", ofs));
+                            cmd.Parameters.Add(_basedatosConexion.CrearParametroSalida("@exito", DbType.Boolean));
+                        });
+
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|Comunes.marca_mensajes_swift_T24|Paso la declaración de parametros, inicia la ejecución del SP: uSP_T24_ADD_TRX.");
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|Comunes.marca_mensajes_swift_T24|Paso la ejecución del SP.");
+                    }
+                    catch (Exception ex)
+                    {
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"AVISO|Comunes.marca_mensajes_swift_T24|ERROR={ex.Message}.");
+                    }
+                }
+
+                const int maxIntentos = 10;
+                for (int i = 0; i < maxIntentos; i++)
+                {
+                    await Task.Delay(1000, ct);
+                    MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|Comunes.marca_mensajes_swift_T24|Inicia ciclo {i + 1} de busqueda de respuesta.");
+                    StoredProcedureResult<IntercambioEntidad> resultadoSp =
+                        await _ejecutarQueryIntercambio(
+                            EnumNombreSp.SP_INTERCAMBIO, cmd =>
+                            {
+                                cmd.Parameters.Add(_basedatosConexion.CrearParametro("@fechaProceso", fechabase));
+                            });
+
+                    if (resultadoSp.Data == null || !resultadoSp.Data.Any())
+                        continue;
+
+                    Dictionary<string, bool> respuesta = resultadoSp.Data
+                        .Where(x => x != null && !string.IsNullOrEmpty(x.RecId))
+                        .GroupBy(x => x.RecId)
+                        .ToDictionary(
+                            g => g.Key,
+                            g => g.First().Cve_status == EstatusSwiftT24.Success);
+
+                    bool todosProcesados = true;
+
+                    foreach (string headerId in swfHeadersId.Keys)
+                    {
+                        string msjId = $"DOH.{headerId}";
+
+                        if (!respuesta.TryGetValue(msjId, out bool estatusExitoso))
+                        {
+                            todosProcesados = false;
+                            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|marca_mensajes_swift_T24|El Swift Headers ID '{headerId}' no ha sido marcado, a realizar siguiente ciclo de revisión.");
+                            break;
+                        }
+
+                        if (!estatusExitoso)
+                        {
+                            todosProcesados = false;
+                            MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"INFO|marca_mensajes_swift_T24|El Swift Headers ID '{headerId}' fue encontrado pero con estatus no exitoso, a realizar siguiente ciclo de revisión.");
+                            break;
+                        }
+                    }
+
+                    if (todosProcesados)
+                    {
+                        MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy("INFO|marca_mensajes_swift_T24|Todos los Swift Headers ID fueron encontrados, se termina el ciclo.");
+                        return true;
+                    }
+                }
+                return false;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                MUFG_T24.Infraestructura.Logging.Logging.WriteLegacy($"{ConstantesClaveAviso.Error}|Comunes.marca_mensajes_swift_T24|{ConstantesClaveAviso.Error}={ex}.");
+                return false;
+            }
+        }
+    }
+}
+
+*****
+using MUFG_T24.Comunes;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Inicializacion_dtos;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Repositorios;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace MUFG_T24.Inicializacion_utilidades
+{
+    /// <summary>
+    /// Implementación de control operativo del servicio en base de datos.
+    /// </summary>
+    /// <remarks>
+    /// Se recomienda registrar <see cref="ControlServicio"/> con ciclo de vida <c>Transient</c> o <c>Scoped</c>. Es <c>thread-safe</c>.
+    /// </remarks>
+    public partial class ControlServicio : RepositorioMaestro, IControlServicio
+    {
+        private readonly IAlertas _alertas;
+
+        /// <summary>
+        /// Inicializa una nueva instancia de <see cref="ControlServicio"/>.
+        /// </summary>
+        /// <remarks>
+        /// Utiliza SQL Server sobre la base de datos InterfacesT24.
+        /// Requiere <see cref="IAlertas"/> por inyección de dependencias.
+        /// </remarks>
+        public ControlServicio(IAlertas alertas)
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        {
+            _alertas = alertas ?? throw new ArgumentNullException(nameof(alertas));
+        }
+
+        /// <summary>
+        /// Marca el estado operativo del servicio en base de datos.
+        /// </summary>
+        /// <remarks>
+        /// Con valores en <paramref name="pid"/>, <paramref name="nombreProceso"/> y <paramref name="nombreDisplay"/>
+        /// registra servicio en ejecución. Con valores nulos en esos parámetros registra servicio detenido.
+        /// ------------------------------------
+        /// Esta firma es de compatibilidad y su consumo es opcional; para escenarios especiales utilice el método tipado.
+        /// </remarks>
+        /// <param name="pid">Identificador del proceso en ejecución; puede ser <c>null</c> durante apagado.</param>
+        /// <param name="nombreProceso">Nombre del proceso en ejecución; puede ser <c>null</c> durante apagado.</param>
+        /// <param name="nombreDisplay">Nombre de display del servicio; puede ser <c>null</c> durante apagado.</param>
+        /// <param name="nombreServicio">Nombre técnico del servicio a actualizar.</param>
+        /// <param name="ct">Token de cancelación opcional.</param>
+        /// <returns><c>true</c> únicamente cuando el estado resultante es <see cref="EstadoResultadoOperacionServicio.Success"/>; en otro caso <c>false</c>.</returns>
+        public async Task<bool> MarcarPuertoEnUsoAsync(int? pid, string nombreProceso, string nombreDisplay, string nombreServicio, CancellationToken ct = default)
+        {
+            try
+            {
+                ResultadoOperacionServicio resultado = await MarcarPuertoEnUsoConResultadoAsync(pid, nombreProceso, nombreDisplay, nombreServicio, ct).ConfigureAwait(false);
+                return resultado.Estado == EstadoResultadoOperacionServicio.Success;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (OperacionNoExitosaException)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Marca el estado operativo del servicio en base de datos devolviendo un resultado tipado.
+        /// </summary>
+        /// <remarks>
+        /// El resultado es opcional para consumidores; de forma general basta con la implementación interna
+        /// de manejo común (log/alerta/throw). Use el resultado solo en casos excepcionales donde requiera
+        /// lógica específica adicional.
+        /// ------------------------------------
+        /// ** A futuro se podrá cambiar Exito por Afectacion para determinar la efectividad del procedimiento.
+        /// Actualmente se evita debido a la imposibilidad de retornar un valor de afectación desde el procedimiento almacenado.
+        /// </remarks>
+        /// <param name="pid">Identificador del proceso en ejecución; puede ser <c>null</c> durante apagado.</param>
+        /// <param name="nombreProceso">Nombre del proceso en ejecución; puede ser <c>null</c> durante apagado.</param>
+        /// <param name="nombreDisplay">Nombre de display del servicio; puede ser <c>null</c> durante apagado.</param>
+        /// <param name="nombreServicio">Nombre técnico del servicio a actualizar.</param>
+        /// <param name="ct">Token de cancelación opcional.</param>
+        /// <returns>Resultado tipado de la operación.</returns>
+        public async Task<ResultadoOperacionServicio> MarcarPuertoEnUsoConResultadoAsync(int? pid, string nombreProceso, string nombreDisplay, string nombreServicio, CancellationToken ct = default)
+        {
+            ResultadoOperacionServicio resultadoOperacion;
+
+            try
+            {
+                StoredProcedureResult<ResultadoVacioDto> resultado = await EjecutarStoredProcedureQuery<ResultadoVacioDto>(
+                    ConstantesProcedimientosMUFG.UspActualizarEnUso,
+                    cmd =>
+                    {
+                        cmd.Parameters.Add(basedatosConexion.CrearParametro("@giPID", pid.HasValue ? (object)pid.Value : DBNull.Value));
+                        cmd.Parameters.Add(basedatosConexion.CrearParametro("@gsProcessName", (object)nombreProceso ?? DBNull.Value));
+                        cmd.Parameters.Add(basedatosConexion.CrearParametro("@gsDisplayName", (object)nombreDisplay ?? DBNull.Value));
+                        cmd.Parameters.Add(basedatosConexion.CrearParametro("@gsNombre_Servicio", nombreServicio));
+                    }, ct).ConfigureAwait(false);
+
+                //Retorna segun la afectación del procedimiento...
+                bool exito = resultado != null && resultado.Exito;
+                resultadoOperacion = new ResultadoOperacionServicio
+                {
+                    Exito = exito,
+                    Estado = exito ? EstadoResultadoOperacionServicio.Success : EstadoResultadoOperacionServicio.PermanentError,
+                    Mensaje = exito
+                        ? "Estado operativo del servicio actualizado correctamente."
+                        : "No se pudo actualizar en base de datos la disponibilidad del puerto."
+                };
+            }
+            //Rechaza si el token de cancelación fue solicitado...
+            catch (OperationCanceledException ex)
+            {
+                resultadoOperacion = new ResultadoOperacionServicio
+                {
+                    Exito = false,
+                    Estado = EstadoResultadoOperacionServicio.Canceled,
+                    Mensaje = "Operación cancelada al actualizar estado operativo del servicio.",
+                    Excepcion = ex
+                };
+            }
+            //Rechaza si ocurrio un error en la operación...
+            catch (Exception ex)
+            {
+                resultadoOperacion = new ResultadoOperacionServicio
+                {
+                    Exito = false,
+                    Estado = EstadoResultadoOperacionServicio.TransientError,
+                    Mensaje = "No se pudo actualizar en base de datos la disponibilidad del puerto.",
+                    Excepcion = ex
+                };
+
+                MUFG_T24.Infraestructura.Logging.Logging.Error($"|OnStop|No se pudo actualizar en base de datos la disponibilidad del puerto: {ex}");
+                await _alertas.InsertarAlerta(null, null, nombreServicio, ConstantesClaveAviso.Critico,
+                    "No se pudo marcar en base de datos el puerto como disponible",
+                    pid.GetValueOrDefault(), nombreProceso, ex).ConfigureAwait(false);
+
+            }
+
+            //Rechaza si la operación no fue exitosa (afectación)...
+            if (!resultadoOperacion.Exito)
+            {
+                if (resultadoOperacion.Excepcion != null)
+                {
+                    throw resultadoOperacion.Excepcion;
+                }
+
+                throw new OperacionNoExitosaException(resultadoOperacion.Mensaje, resultadoOperacion.Estado);
+            }
+
+            return resultadoOperacion;
+        }
+
+        /// <summary>
+        /// Marca una operación con error de fecha pasada.
+        /// </summary>
+        /// <remarks>
+        /// Esta firma es de compatibilidad y su consumo es opcional; para escenarios especiales utilice el método tipado.
+        /// </remarks>
+        /// <param name="folio">Folio de la operación a marcar.</param>
+        /// <param name="ct">Token de cancelación opcional.</param>
+        /// <returns><c>true</c> únicamente cuando el estado resultante es <see cref="EstadoResultadoOperacionServicio.Success"/>; en otro caso <c>false</c>.</returns>
+        public async Task<bool> MarcarErrorFechaPasada(long folio, CancellationToken ct = default)
+        {
+            try
+            {
+                ResultadoOperacionServicio resultado = await MarcarErrorFechaPasadaConResultadoAsync(folio, ct).ConfigureAwait(false);
+                return resultado.Estado == EstadoResultadoOperacionServicio.Success;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (OperacionNoExitosaException)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Marca una operación con error de fecha pasada devolviendo un resultado tipado.
+        /// </summary>
+        /// <remarks>
+        /// El resultado es opcional para consumidores; de forma general basta con la implementación interna
+        /// de manejo común (throw en no éxito). Use el resultado solo en casos excepcionales donde requiera
+        /// lógica específica adicional.
+        /// </remarks>
+        /// <param name="folio">Folio de la operación a marcar.</param>
+        /// <param name="ct">Token de cancelación opcional.</param>
+        /// <returns>Resultado tipado de la operación.</returns>
+        public async Task<ResultadoOperacionServicio> MarcarErrorFechaPasadaConResultadoAsync(long folio, CancellationToken ct = default)
+        {
+            ResultadoOperacionServicio resultadoOperacion;
+
+            try
+            {
+                StoredProcedureResult<ResultadoVacioDto> resultado = await EjecutarStoredProcedureQuery<ResultadoVacioDto>(
+                    ConstantesProcedimientosMUFG.UspFechaPasada,
+                    cmd =>
+                    {
+                        cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", folio));
+                    }, ct).ConfigureAwait(false);
+
+                //Retorna segun la afectación del procedimiento...
+                bool exito = resultado != null && resultado.Exito;
+                resultadoOperacion = new ResultadoOperacionServicio
+                {
+                    Exito = exito,
+                    Estado = exito ? EstadoResultadoOperacionServicio.Success : EstadoResultadoOperacionServicio.PermanentError,
+                    Mensaje = exito
+                        ? "Operación marcada correctamente con error de fecha pasada."
+                        : "No se pudo marcar la operación con error de fecha pasada."
+                };
+            }
+            //Rechaza si el token de cancelación fue solicitado...
+            catch (OperationCanceledException ex)
+            {
+                resultadoOperacion = new ResultadoOperacionServicio
+                {
+                    Exito = false,
+                    Estado = EstadoResultadoOperacionServicio.Canceled,
+                    Mensaje = "Operación cancelada al marcar error de fecha pasada.",
+                    Excepcion = ex
+                };
+            }
+            //Rechaza si ocurrio un error en la operación...
+            catch (Exception ex)
+            {
+                resultadoOperacion = new ResultadoOperacionServicio
+                {
+                    Exito = false,
+                    Estado = EstadoResultadoOperacionServicio.TransientError,
+                    Mensaje = "No se pudo marcar la operación con error de fecha pasada.",
+                    Excepcion = ex
+                };
+            }
+
+            if (!resultadoOperacion.Exito)
+            {
+                if (resultadoOperacion.Excepcion != null)
+                {
+                    throw resultadoOperacion.Excepcion;
+                }
+
+                throw new OperacionNoExitosaException(resultadoOperacion.Mensaje, resultadoOperacion.Estado);
+            }
+
+            return resultadoOperacion;
+        }
+
+    }
+}
