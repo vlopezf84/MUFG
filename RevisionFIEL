@@ -1,0 +1,419 @@
+SPID FIEL Recommendations
+SPID_FIEL - Architecture & Code Quality Recommendations
+Audit date: 2026-10-14. Solution: SPID_FIEL.sln (../../SPEI_SPID/SPID_FIEL/SPID_FIEL.sln). Source revision: 493e90fce9e80bdacaa2f7135c29dba89a4484e7, branch CodeReview. Compared against: LoansApp coding-practices baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review checklist (../BaseLine_Docs/code_review.md). Control/methodology: _ORCHESTRATION.md (./_ORCHESTRATION.md). Target: .NET Framework 4.8, x86; C# 7.3 explicitly selected in the x86 configurations. Review focus/severity threshold: all.
+1. Solution Overview (low/no-dependency -> high dependency)
+Tier	Project	Kind / responsibility	Project file
+0	Aplicacion	Scheduling, orchestration, contracts, configuration and response-status mapping	Aplicacion.csproj (../../SPEI_SPID/SPID_FIEL/Aplicacion/Aplicacion.csproj)
+1	Infraestructura	Pending-FIEL queries, SOAP transport, response extraction and SQL result persistence	Infraestructura.csproj (../../SPEI_SPID/SPID_FIEL/Infraestructura/Infraestructura.csproj)
+2	SPID_FIEL	Windows Service composition, timer hook, startup/shutdown bookkeeping	SPID_FIEL.csproj (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/SPID_FIEL.csproj)
+2	PruebasUnitarias	MSTest/Moq orchestration tests	PruebasUnitarias.csproj (../../SPEI_SPID/SPID_FIEL/PruebasUnitarias/PruebasUnitarias.csproj)
+
+What this solution actually does: a timer-driven Windows Service obtains pending customer FIEL values from TOMI, checks schedules/business-day state, sends SOAP certificate-query/validation requests to a configured SPID endpoint, interprets response values, and persists status/result information. It also updates service execution state and creates operational alerts. There is no inbound web/API host, message-queue listener, or demonstrated local private-key/signing implementation in this repository.
+The executable is currently under the nested SPID_FIEL directory, not the historical Entradas host path. See the understanding document (../excecutive_docs/SPID_FIEL/Application_understanding_technical_document.md) and verified dependency ladder (../excecutive_docs/SPID_FIEL/Base_Project_Dependency_Ladder.md).
+2. Scope & Methodology Note
+Exhaustive coverage
+Every file and line in the following inventory was read, including DTOs, enums, assembly/project metadata, designer code, configuration, tests, README, solution, and .gitignore. No representative-file sampling was used.
+Area	Files read / inventoried	Physical lines read
+Aplicacion	15 / 15	611
+Infraestructura	4 / 4	539
+SPID_FIEL host	7 / 7	441
+PruebasUnitarias	4 / 4	264
+Root support	3 / 3	638
+Total	33 / 33	2,493
+
+The hashed source manifest (./_SPID_FIEL_FileManifest.csv) and batch/verification record (./_SPID_FIEL_ExhaustiveReview_Progress.md) make this coverage resumable and auditable. The source repository was initially clean; no application source changes were requested or made.
+Review basis and limits
+• The user confirmed the existing baseline/checklist/shared output and explicitly authorized all four small projects in this turn.
+• No Jira/ADO story, WSDL, database schema/procedure body, production configuration, or SLA was supplied. The user authorized objective source behavior as the review basis. Business rules not established by code remain owner questions, not asserted requirements.
+• The LoansApp baseline has empty evidence/count sections. Its stated practices are used as standards, not as verified examples of another application's quality.
+• MUFG_T24 is dependency context only. Relevant repository, process-identity, cloning, lifecycle, logging, and control contracts were traced. No finding is located inside that shared library, and its workspace source is not proof of the absent deployed DLL's version.
+• Findings distinguish confirmed source behavior from conditional impact. In particular, namespaced SOAP responses, overlength identifiers, and failed SQL outcomes are explicit triggering cases, not claims about observed production traffic.
+• The audit skill's six-section report template is used. PR checklist severities are retained rather than inventing CVSS scores or asserting a production-release certification.
+Categories and priorities
+Each issue has exactly one category:
+• MustChange/rewrite: a demonstrated defect, failed assurance/build gate, or checklist Blocker. This does not mean rewrite the entire service.
+• rewrite_recommended: a maintainability/test-seam improvement to otherwise functioning structure.
+• NiceToRewrite_ifTimePermits: low-risk documentation/cleanup work.
+Category	Count
+MustChange/rewrite	12
+rewrite_recommended	1
+NiceToRewrite_ifTimePermits	1
+Total distinct findings	14
+
+Checklist severity	Count	Meaning
+Blocker	8	Resolve before approving a change/release under this checklist
+Major	5	Fix before merge unless explicitly waived; four are concrete defects and one is a design improvement
+Minor	1	Track/document without delaying the correctness fixes
+
+Quantified cross-checks, not substitutes for reading
+• One test class, two test methods, four Moq behavior verifications, and zero Assert calls. All four verifications belong to the positive test; the negative test has none.
+• Two message-only exception rethrows and two near-identical alert payloads that replace the exception object with its string representation.
+• One Task.Run-wrapped synchronous HTTP path; no local .Result, .Wait(), or GetAwaiter().GetResult() calls.
+• Two FirstOrDefault sites are guarded by null propagation; no unguarded materialized result was found.
+• No local DES/3DES/MD5/SHA-1 implementation, private-key construction, or certificate-resource leak was found. This does not certify external dependencies or production TLS configuration.
+• Four exact shared-DLL HintPaths in this solution. A current metadata cross-check found the same absolute MUFG_T24 path in 213 of 228 portfolio project files. No portfolio nuget.config or MUFG/T24-named package archive was found.
+Validation actually performed
+Check	Result / limitation
+Parse/resolve all project edges	Passed: four nodes, five edges, tiers 0/1/2/2, no internal cycle/missing project target
+Test-fixture key/enum cross-check	Confirmed both required operation-window keys are absent from the fixture dictionary
+XML API/source-derived probes	Confirmed a code-only response maps to PROCESADO with empty state; qualified return names are missed by the current lookup
+String API probe	Confirmed a 31-character submitted identity becomes a different 30-character SQL key
+Extracted shared-sanitizer probes	Compiled the exact sanitizer methods/constants only: all four local colon/XML formats retained dummy customer data, while a keyed PASSWORD control was masked. Not a compiled production logger/application run
+Focused unit-test tool	Attempted for the existing test file; tool reported no tests found. This is a discovery/tooling failure, not evidence that the two source tests do not exist
+Offline Framework MSBuild reference resolution	Exit 0 with ToolsVersion 15 -> 4 fallback and MSB3644: .NET Framework 4.8 reference assemblies missing. This is not a successful solution build
+Full build/test execution	Unverified: modern SDK/Visual Studio toolchain, target reference assemblies, solution packages, and D-drive MUFG_T24 DLL unavailable
+Database, endpoint and SCM execution	Not performed; no production connections or service operations attempted
+Word companion	Package/content checks are recorded after conversion in the progress/handover records; visual layout still requires Word inspection
+
+The source-derived probes exercise the same .NET XML/string operations and mapping conditions; they are not compiled C# application tests and do not count as coverage.
+3. What's Already Good
+Strength	Evidence / reason to preserve it
+Real project boundaries and constructor injection	OperacionServicio.cs:41 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L41) receives application/repository abstractions; infrastructure references application contracts, not the host
+Centralized DI composition and verification	ServiceHost.cs:51 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs#L51) uses SimpleInjector and AsyncScopedLifestyle; retain verification while fixing configuration lifetime/identity
+Async tick scope	ServiceHost.cs:144 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs#L144) resolves the application inside an asynchronous scope
+XML escaping on outbound values	OperacionesRepositorio.cs:109 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L109) builds the envelope with XElement/XNamespace, not raw concatenation of a FIEL value
+Explicit SQL parameter types and lengths	OperacionesRepositorio.cs:282 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L282) assigns SqlDbType/Size; no input-concatenated SQL is present locally
+Deterministic local HTTP resource disposal	OperacionesRepositorio.cs:215 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L215) disposes the request stream, response and response reader
+Null-safe optional query lookup	ConsultaCamposBDTomi.cs:41 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/ConsultaCamposBDTomi.cs#L41) and OperacionesRepositorio.cs:334 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L334) guard FirstOrDefault results
+Testable pure response mapper	ValidadorRespuestaFiel.cs:17 (../../SPEI_SPID/SPID_FIEL/Aplicacion/Servicios/ValidadorRespuestaFiel.cs#L17) has no I/O; add direct boundary tests rather than replacing it with a framework
+A real, not placeholder, test project	SpidFielUT.cs:15 (../../SPEI_SPID/SPID_FIEL/PruebasUnitarias/SpidFielUT.cs#L15) contains MSTest methods and Moq verifications; repair and extend it rather than reporting zero tests
+Existing transition de-duplication	OperacionServicio.cs:158 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L158) attempts to alert once per reading-window transition; preserve this state when correcting the singleton clone
+
+Shared base context also provides serialized timer ticks, startup-before-tick ordering, process metadata validation, and distinct wait/cleanup tokens. Do not recommend reimplementing those already-existing facilities locally.
+4. Findings by Project (low/no-dependency -> high dependency)
+Recommended snippets below are focused C# 7.3-compatible patterns, not applied patches or a claim that contract-dependent helpers/packages already exist.
+4.1 Aplicacion (Tier 0) and cross-project build metadata
+MustChange / Rewrite
+FIEL-FR-14 - Make the shared-library build dependency reproducible
+Category: MustChange/rewrite. Severity: Blocker. Checklist: section 11. Standing finding: GEN-1.
+Locations: Aplicacion.csproj:56 (../../SPEI_SPID/SPID_FIEL/Aplicacion/Aplicacion.csproj#L56), Infraestructura.csproj:56 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Infraestructura.csproj#L56), host project:81 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/SPID_FIEL.csproj#L81), test project:75 (../../SPEI_SPID/SPID_FIEL/PruebasUnitarias/PruebasUnitarias.csproj#L75).
+Current dependency:
+Code block (xml)
+<HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+All four projects depend on a machine-provisioned DLL; three explicitly disable exact assembly-version selection. No approved feed configuration or matching package archive is present, and the target DLL is absent on this machine. This is the existing portfolio convention, not four independent service bugs. Relative, pinned NuGet dependencies such as SimpleInjector should not be misclassified as absolute references.
+Fix: publish the approved MUFG_T24 build as a versioned internal package with its transitive dependencies, then consume an explicitly pinned approved version. Keep packages.config if that is the supported migration path; PackageReference is an alternative, not a prerequisite for rewriting the project.
+Illustrative package pattern; the property must be set to a real approved pinned version:
+Code block (xml)
+<PackageReference Include="MUFG_T24" Version="$(MufgT24PackageVersion)" />
+Benefit / verification: a clean approved agent builds all four projects and discovers/runs tests without manually copying D-drive DLLs. Capture binary/package provenance, targeting pack, restored versions and binding behavior. Missing local dependencies are not proof that the deployed service fails.
+FIEL-FR-2 - Protect the entire tick with finalization
+Category: MustChange/rewrite. Severity: Blocker. Checklist: sections 5/7. Standing finding: GEN-7.
+Locations: OperacionServicio.cs:56 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L56), required-key validation:127 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L127), late try:178 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L178), finalization:229 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L229).
+Current ordering, abbreviated:
+Code block (csharp)
+await _IparametrosOperaciones.MarcarServicioEnEjecucion(_configuracion.NombreServicio);
+var dicParametrosSistema = await _IparametrosOperaciones.parametrosSistema();
+// Schedule parsing, required-key checks, and an alert occur here.
+try
+{
+    // Processing.
+}
+finally
+{
+    await _IparametrosOperaciones.MarcarServicioEnFinalizacion(_configuracion.NombreServicio);
+}
+Once execution has been marked, parameter retrieval/parsing, required-key validation, business-day lookup, or the out-of-hours alert can fail before the try is entered. The tick's finalization is then skipped. The host logging the error or clearing state at eventual service shutdown does not repair that failed tick.
+Fix: put all post-marking work inside the protected region, preserving the original failure if cleanup also fails:
+Code block (csharp)
+await _IparametrosOperaciones.MarcarServicioEnEjecucion(_configuracion.NombreServicio);
+try
+{
+    await LoadValidateAndProcessTickAsync();
+}
+finally
+{
+    await FinalizeTickAndReportCleanupOutcomeAsync();
+}
+The two helper names illustrate extraction of existing work; they must be implemented with explicit primary/cleanup error reporting and the checked-result policy in FIEL-FR-4, not silent catches.
+Benefit / tests: execution state does not remain active after malformed/missing parameters or alert failure. Inject failures at parameter load, each validation boundary, alerting, processing, and cleanup; assert finalization is attempted once after a successful mark and primary/cleanup failures remain observable.
+FIEL-FR-9 - Preserve original exceptions at service boundaries
+Category: MustChange/rewrite. Severity: Blocker. Checklist: section 5.
+Locations: application rethrow:222 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L222), repository rethrow:74 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L74); duplicated alert construction at application:218 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L218) and repository:72 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L72).
+Current examples:
+Code block (csharp)
+Exception = new Exception(ex.ToString())
+Code block (csharp)
+throw new Exception($"ERROR|Ejecuta_Procedimientos|{ex}");
+There are two message-only rethrows and two copied alert payloads. Formatting an exception into a new Exception preserves some text, not the exception type, InnerException, original structured stack, or cancellation identity. An awaited alert failure can also replace the operational failure before the rethrow is reached.
+Fix: attach the original exception to the alert and rethrow it with throw;. If additional exception context is genuinely needed, use a specific wrapper with the original inner exception.
+Code block (csharp)
+Exception = ex
+Code block (csharp)
+throw;
+Use one tested service-failure reporting boundary for the two copied payloads. If alert delivery fails, explicitly log/record that secondary failure without losing the primary exception; do not turn it into a successful operation.
+Benefit / tests: SQL, XML, timeout and cancellation failures remain distinguishable. Assert reference/type/InnerException preservation and verify that a failing alert sink cannot conceal the primary exception.
+FIEL-FR-7 - Carry cancellation through the operation and real I/O
+Category: MustChange/rewrite. Severity: Major. Checklist: sections 6/10.
+Locations: IOperacionServicio.cs:14 (../../SPEI_SPID/SPID_FIEL/Aplicacion/Interfaces/IOperacionServicio.cs#L14), IOperacionesSpidFiel.cs:14 (../../SPEI_SPID/SPID_FIEL/Aplicacion/Interfaces/IOperacionesSpidFiel.cs#L14), host tick:147 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs#L147), HTTP wrapper:142 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L142), blocking response:217 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L217).
+Current contracts and wrapper:
+Code block (csharp)
+Task EjecutaProcedimientosAsync();
+Code block (csharp)
+string xmlData = await Task.Run(() =>
+    ConsumeWebServiceSPID(_configuracion.StrURLWebService, strWebServiceXML)) ?? string.Empty;
+The host receives a tick CancellationToken but cannot pass it through these contracts. SQL overloads select CancellationToken.None; the HTTP call blocks a pool thread, and the loop never checks shutdown cancellation.
+Shared lifecycle context was verified: stop cancels the tick token, waits only a bounded time, and its wait helper can return after timeout without completing the task. Consequently the local batch can continue HTTP/SQL work after cleanup marks the service stopped and disposes the DI container. This is not a claim that the base permits overlapping timer ticks; it serializes them.
+Fix: add/propagate a CancellationToken through application/repository methods, pass it to existing shared SQL overloads, and replace Task.Run-wrapped synchronous transport with a reusable .NET Framework-compatible async HTTP transport whose request and body reads are cancellable/bounded.
+Code block (csharp)
+Task EjecutaProcedimientosAsync(CancellationToken ct);
+Code block (csharp)
+await operacionServicio.EjecutaProcedimientosAsync(ct).ConfigureAwait(false);
+Check the token between records, preserve OperationCanceledException, and retain the host's separate cleanup token. Merely passing a token to Task.Run does not cancel an already-running synchronous request.
+Benefit / tests: a stop during connection, response-body read, or a multi-FIEL batch promptly stops further processing; no new record is processed after cancellation, and cleanup behavior is verified without live services.
+Rewrite Recommended
+FIEL-FR-12 - Extract narrow transport and failure-reporting test seams
+Category: rewrite_recommended. Severity: Major. Checklist: sections 12/13.
+Locations: repository constructor:38 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L38), private transport:194 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L194), application alert:209 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L209).
+Current constructor fragment:
+Code block (csharp)
+public OperacionesRepositorio(ConfiguracionServicio configuracion, Alertas alertas)
+The repository combines SQL access, envelope construction, synchronous transport, response mapping and failure reporting. The two copied alert payloads duplicate exception/identity policy. Although constructor injection and application interfaces already exist, the concrete Alertas dependency and private hardwired transport make deterministic protocol/failure tests difficult.
+Fix: reuse the already-registered shared IAlertas contract where appropriate, retain IParametrizacion as the clock seam, and inject one narrow FIEL transport abstraction. Extract a typed response parser and one error-reporting boundary; do not add a generic framework, a second DI container, or an unnecessary EF/UoW migration.
+Illustrative constructor shape, with a new transport interface to implement:
+Code block (csharp)
+public OperacionesRepositorio(
+    ConfiguracionServicio configuracion,
+    IAlertas alertas,
+    IFielTransport transport)
+Benefit / tests: SOAP faults, malformed responses, network timeouts, cancellation, persistence failure and alert failure can be tested without central configuration files or live infrastructure. This extraction should support, not postpone, the focused fixes above.
+Nice to Rewrite if Time Permits
+No separate application naming-only ticket is raised. Database-mapped DTO names must not be blindly renamed without preserving the mapping contract.
+4.2 Infraestructura (Tier 1)
+MustChange / Rewrite
+FIEL-FR-3 - Do not convert SQL failures into empty work or successful updates
+Category: MustChange/rewrite. Severity: Blocker. Checklist: sections 5/8. Standing finding: GEN-11.
+Locations: pending query:55 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L55), parameter query:50 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/ConsultaCamposBDTomi.cs#L50), update:271 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L271), success return:318 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L318), partial-failure continuation:169 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L169).
+Current result handling:
+Code block (csharp)
+var data = spEjecucion?.Data ?? new List<DLField>();
+Code block (csharp)
+Config.EscribirLog("INFO|ActualizaDatosFIEL|Datos Actualizados",
+    NombreServicio.SPID_FIEL.ToString());
+return true;
+The latter occurs after the nonquery result has been awaited and discarded. The current shared repository contract was followed through its overloads and validation: a caught SqlException can produce Exito=false without throwing; the query's strict validation flag defaults to false. Therefore the local query can report no pending work on SQL failure, and a failed update can be logged/returned as successful. An actual exception becomes false in the private update method, then the loop simply continues without a batch failure result.
+This finding is the service's misuse of a shared result contract, not a duplicate finding against MUFG_T24 internals. Procedure-generated errors that the library already throws must not be counted as additional swallowed-error cases.
+Fix: check Exito before consuming query data, capture/check the nonquery result before success logging, and preserve SQL Exception context. For example, after capturing the result:
+Code block (csharp)
+if (resultadoSp == null || !resultadoSp.Exito)
+{
+    throw new InvalidOperationException(
+        "FIEL persistence failed.", resultadoSp?.Exception);
+}
+Apply the equivalent guard to pending/configuration reads. Do not erase a failed persistence outcome with an unconditional true, empty list, or unreported loop continuation. If per-record continuation is required, return an explicit batch outcome with failed identities; confirm retry/idempotency policy with the owner.
+Benefit / tests: empty-success and failed-query are distinguishable; failure never produces a "Datos Actualizados" event. Test Exito=false with empty and populated Data, null results, SQL exceptions, and one failed record among successful records. Verify the application receives the failure and FIEL-FR-2 cleanup still runs.
+FIEL-FR-4 - Verify finalization outcomes before declaring shutdown successful
+Category: MustChange/rewrite. Severity: Blocker. Checklist: sections 5/8. Standing finding: GEN-9.
+Locations: ConsultaCamposBDTomi.cs:81 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/ConsultaCamposBDTomi.cs#L81), host shutdown:179 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs#L179), host termination update:182 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs#L182), success log:184 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs#L184).
+Current wrapper:
+Code block (csharp)
+public async Task MarcarServicioEnFinalizacion(string strNombreServicio)
+    => await ActualizaTerminacion(strNombreServicio);
+It discards the returned StoredProcedureResult. Shared ActualizaTerminacion can log/return Exito=false; it does not always throw. The host similarly discards a Boolean stop-state result and a structured termination result, then logs successful database termination.
+Fix: retain a meaningful outcome or throw a contextual exception when required finalization fails:
+Code block (csharp)
+var result = await ActualizaTerminacion(strNombreServicio);
+if (result == null || !result.Exito)
+{
+    throw new InvalidOperationException(
+        "Service finalization failed.", result?.Exception);
+}
+At shutdown, attempt the required independent cleanup operations and accurately report their individual outcomes; only emit the success event when the required results are successful. Preserve the independent cleanup token and the primary failure policy from FIEL-FR-2/FIEL-FR-9.
+Important contract distinction: current ActualizaEJecucion already throws on a failed result, so its void-like wrapper is not reported as an additional lost-failure defect. The shared startup Boolean API documents optional consumption; this finding does not assert that every startup false result must stop the service. The confirmed local error is erasing finalization failure and positively declaring successful shutdown.
+Benefit / tests: false/failed cleanup is observable and cannot generate a success-shaped outcome. Test failed Boolean state clearing, Exito=false termination, cleanup cancellation, and combined primary/cleanup failure.
+FIEL-FR-5 - Validate the SOAP response before committing a terminal status
+Category: MustChange/rewrite. Severity: Blocker. Checklist: sections 3/4/9.
+Locations: response parse:150 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L150), return lookup:152 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L152), missing-value fallback:334 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L334), success mapping:19 (../../SPEI_SPID/SPID_FIEL/Aplicacion/Servicios/ValidadorRespuestaFiel.cs#L19).
+Current extraction/mapping:
+Code block (csharp)
+var elementos = sysDocumento.GetElementsByTagName("return");
+Code block (csharp)
+bool hayError = !int.TryParse(valor0, out var code) || code != 0;
+No SOAP envelope/body/operation/fault/field-shape validation occurs before positional values are persisted. Missing positions become empty strings. A response containing only one return value, 0, yields PROCESADO with empty EstadoConsulta under the current mapping. Qualified names such as r:return are not found by the exact qualified-name lookup; their absence is converted into a business error instead of a distinct protocol failure.
+The offline probes confirmed these API/control-flow cases. They do not establish that the production endpoint currently uses those malformed/prefixed examples. The WSDL and valid field/status semantics must be obtained before changing the contract.
+Fix: reuse the exact three-argument XmlHelper.TryParseXmlSeguro overload already used for outbound validation; perform namespace-aware selection within the expected SOAP body/operation; reject SOAP Fault and incomplete/unrecognized success shapes before calling persistence. Distinguish transport/protocol failure from a valid business rejection and avoid committing a terminal customer status for the former. The three-argument implementation was checked for prohibited DTDs/null resolvers; do not assume the shared overloads are interchangeable.
+Code block (csharp)
+if (!XmlHelper.TryParseXmlSeguro(
+    xmlData, out XmlDocument response, out string parseError))
+{
+    throw new XmlException(parseError);
+}
+At a minimum, after the owner confirms that a successful response requires the state currently read at position 5:
+Code block (csharp)
+if (int.TryParse(valor0, out var responseCode) &&
+    responseCode == 0 &&
+    string.IsNullOrWhiteSpace(valor5))
+{
+    throw new InvalidOperationException("Incomplete FIEL success response.");
+}
+This guard supplements, not replaces, the typed SOAP contract validation.
+Benefit / tests: one-return success, missing body/operation, wrong namespace, qualified valid returns, SOAP Fault, invalid XML, nonnumeric code, valid rejection and complete success all have explicit outcomes. Assert that protocol failures never call the terminal-status update.
+No XXE exploit is asserted merely because LoadXml is used: .NET Framework version/default resolver behavior must be considered. Safe parsing is recommended without inventing an external-entity vulnerability.
+FIEL-FR-6 - Remove unredacted customer identifiers and SOAP payloads from routine logs
+Category: MustChange/rewrite. Severity: Blocker. Checklist: sections 5/9.
+Locations: identifier:101 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L101), request XML:130 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L130), response XML:143 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L143), every return value:162 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L162).
+Current example:
+Code block (csharp)
+Config.EscribirLog($"INFO|ValidaFIEL|XML a Enviar: {strWebServiceXML}",
+    NombreServicio.SPID_FIEL.ToString());
+Four logging sites expose the raw customer FIEL value, its request envelope, the complete response, and each parsed value at INFO. This copies customer/certificate-query data into general operational logs. No masking flag is supplied at these call sites. No claim is made that the values are private keys or passwords; their exact classification, log ACLs and retention policy are unavailable.
+The effective shared logging path was checked: FileLogger always applies sensitive-key redaction, even when the flag is false, but that filter handles recognized key/value text. These colon-delimited FIEL messages and SOAP element bodies are not covered by that filter. This is not a claim that MUFG_T24 has no redaction facility, nor a duplicate finding against the logger.
+Fix: use allow-listed operational fields, a non-sensitive correlation ID, an approved irreversible/masked customer reference, outcome code and elapsed time. Keep payload capture disabled by default and subject to explicit approved access/retention controls if it is genuinely required.
+Example replacement shape, using non-sensitive metadata rather than request/response contents:
+Code block (csharp)
+Config.EscribirLog(
+    $"INFO|ValidaFIEL|CorrelationId={correlationId}|Outcome={outcomeCode}",
+    NombreServicio.SPID_FIEL.ToString());
+The correlation ID must not itself encode the FIEL value; unexpected remote text must not be copied into outcomeCode.
+Benefit / tests: operators can correlate failures without routinely retaining customer payloads. Capture logs in tests and assert that neither the raw FIEL value nor request/response bodies appears on success, rejection, parse failure, or exception paths. Review existing log access/retention separately with the owner.
+FIEL-FR-8 - Honor the configured web-service timeout
+Category: MustChange/rewrite. Severity: Major. Checklist: sections 10/11.
+Locations: configuration load:112 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L112), configuration property:27 (../../SPEI_SPID/SPID_FIEL/Aplicacion/Modelos/ConfiguracionServicio.cs#L27), transport:210 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L210).
+Current effective setting:
+Code block (csharp)
+hwrequest.Timeout = 60000;
+SPID_WEBSERVICE_TIMEOUT is loaded into StrWebServiceTimeout and logged, but the transport never reads it. Operators changing the configured deadline do not change the actual request timeout. A request timeout alone also does not establish an end-to-end batch/body-read deadline.
+Fix: confirm the configuration's units and allowed range, parse it once into a typed validated timeout, and use it in the cancellable transport from FIEL-FR-7. If the owner confirms millisecond units, the effective assignment becomes:
+Code block (csharp)
+hwrequest.Timeout = validatedTimeoutMilliseconds;
+Reject malformed/out-of-range configuration explicitly rather than silently substituting 60 seconds. Define body-read and whole-operation cancellation semantics.
+Benefit / tests: verify two distinct configured deadlines, invalid/zero/negative/overflow values, response-body stalls, and shutdown cancellation. The configured value must measurably affect the transport, not merely the logs.
+FIEL-FR-10 - Do not silently mutate the identifier used for the SQL update
+Category: MustChange/rewrite. Severity: Major. Checklist: sections 3/8.
+Location: OperacionesRepositorio.cs:261 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L261); compare the full trimmed outbound value at SOAP argument:121 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L121).
+Current key conversion:
+Code block (csharp)
+["@fiel"] = (strFiel ?? string.Empty).Length > 30
+    ? strFiel.Substring(0, 30) : strFiel ?? string.Empty
+For an overlength value, the remote query uses the full trimmed identity but persistence receives a different prefix. Unlike truncating an informational message, truncating a lookup/update key changes which identity is addressed or causes a silent non-match. A 31-character input demonstrates that mismatch. The repository does not include the schema, so actual valid lengths or production occurrence are not asserted.
+Fix: confirm the domain/schema limit, validate before the outbound call, and reject/quarantine invalid identifiers with a visible outcome. Persist the exact validated identity; never repair an identity by dropping characters.
+If the existing 30-character SQL parameter reflects the approved contract:
+Code block (csharp)
+if (fiel.Length > 30)
+{
+    throw new ArgumentException(
+        "FIEL identifier exceeds the supported length.", nameof(listaFiel));
+}
+Then assign the validated fiel directly to the SQL parameter. Confirm the database update's affected-identity semantics with its owner.
+Benefit / tests: exercise lengths 0/1/30/31, null/blank and surrounding whitespace according to the agreed policy; assert the remote and SQL keys are identical for accepted values and no remote call occurs for rejected input.
+Rewrite Recommended
+FIEL-FR-12 owns the transport/parser/alert seam work. Do not create a second ticket merely because the same extraction spans both layers.
+Nice to Rewrite if Time Permits
+No independent style-only infrastructure issue is prioritized above the correctness work.
+4.3 SPID_FIEL host (Tier 2)
+MustChange / Rewrite
+FIEL-FR-1 - Do not cache a pre-parameterization configuration clone
+Category: MustChange/rewrite. Severity: Blocker. Checklist: sections 4/11. Standing finding: GEN-8, local early-clone variant.
+Locations: singleton registration:92 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs#L92), verification:103 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs#L103), later identity assignment:119 (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs#L119), application PID cast:170 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L170), repository PID cast:70 (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs#L70).
+Current registration:
+Code block (csharp)
+_containerDI.Register<ConfiguracionServicio>(
+    () => (ConfiguracionServicio)_configuracionBase.Clone(), Lifestyle.Singleton);
+Initialization calls Verify before ParametrizacionesAsync copies PID/process/display values onto the original host configuration. Simple Injector 5's verification contract (https://docs.simpleinjector.org/en/latest/howto.html#verify-configuration) explicitly resolves an instance for every registration, so the singleton clone is cached at verification time.
+Shared dependency context was checked: Configuracion.Pid starts null; Clone uses MemberwiseClone; shared startup calls Inicializacion before ParametrizacionesAsync; its process-contract check locates the original _configuracionBase field, not the clone held by the application's consumers. Updating and validating the original does not update the cached clone.
+Consequently the application/repository retain null PID/process metadata. The out-of-hours alert or exception alert then casts that null PID to int, raising a secondary InvalidOperationException and suppressing the intended alert. The former alert also occurs before the finalization guard, compounding FIEL-FR-2.
+Fix: use one deliberate shared service-configuration instance whose identity is populated before ticks, or construct an immutable initialized snapshot before it is registered/resolved. The smallest current-pattern fix is:
+Code block (csharp)
+_containerDI.RegisterInstance<ConfiguracionServicio>(_configuracionBase);
+Preserve the current transition/de-duplication flags on that shared instance, validate the exact instance consumed by the operation, and avoid introducing a silent PID=0 fallback. Keep the shared base lifecycle/metadata validation; this is a local clone-order defect, not a missing InitializeComponent or missing base-initialization finding.
+Benefit / tests: build a no-I/O DI graph with stand-ins, run Verify, assign startup identity, then resolve the operation/repository and assert that they observe the assigned identity. Verify out-of-hours and failure alerts after startup without a nullable-PID exception, using the approved shared binary.
+FIEL-FR-4 and FIEL-FR-7 also affect host shutdown/token propagation; they are not duplicated here.
+Rewrite Recommended
+No new host framework/container is required to fix the confirmed defects.
+Nice to Rewrite if Time Permits
+Hosting modernization is an evaluation in section 5, not an additional code defect.
+4.4 PruebasUnitarias (Tier 2)
+MustChange / Rewrite
+FIEL-FR-11 - Repair the required parameter keys and assert the negative scenario
+Category: MustChange/rewrite. Severity: Major. Checklist: section 13.
+Locations: fixture keys:72 (../../SPEI_SPID/SPID_FIEL/PruebasUnitarias/SpidFielUT.cs#L72), concrete parameterization:44 (../../SPEI_SPID/SPID_FIEL/PruebasUnitarias/SpidFielUT.cs#L44), negative test:110 (../../SPEI_SPID/SPID_FIEL/PruebasUnitarias/SpidFielUT.cs#L110); compare production enum:16 (../../SPEI_SPID/SPID_FIEL/Aplicacion/Enums/ParametrosSistemaENUM.cs#L16) and required-key check:127 (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs#L127).
+Current fixture:
+Code block (csharp)
+["HORA_OPERACIONES_INICIO"] = "00:00",
+["HORA_OPERACIONES_FIN"] = "23:59"
+Production accepts HORA_OP_INICIO / HORA_OP_FIN, not those strings. Enum.TryParse skips both entries, and both required flags remain false even though the configuration object has pre-filled time values. If fixture initialization succeeds, each test throws at the missing-operation-window guard before reaching its intended behavior. This is confirmed by source/key analysis, not an executed suite failure.
+The non-business-day test also contains only an await, with no behavior assertions. The fixture instantiates a real Parametrizacion whose shared repository constructor initializes external configuration; it needlessly depends on machine setup just to obtain a clock value.
+Fix: derive keys from the production enum, use a Mock<IParametrizacion> for a fixed time, and verify that the negative scenario never obtains/processes FIEL entries while still finalizing the tick.
+Code block (csharp)
+[ParametrosSistema.HORA_OP_INICIO.ToString()] = "00:00",
+[ParametrosSistema.HORA_OP_FIN.ToString()] = "23:59"
+Code block (csharp)
+_repositorioSpidFiel.Verify(x => x.ObtenerListaField(), Times.Never);
+_repositorioSpidFiel.Verify(
+    x => x.ValidaSpidFiel(It.IsAny<List<string>>()), Times.Never);
+Add the same token parameter to these verifications when FIEL-FR-7 changes the contract. Add failure, boundary, response-mapper and cleanup tests required by the other findings; do not claim a coverage percentage until a real run measures it.
+Benefit / tests: both existing tests reach their intended branches on a clean machine, do not depend on wall-clock/calendar infrastructure, and fail when prohibited work occurs. Restore approved dependencies/tooling and run the repaired suite plus the new regression cases.
+Rewrite Recommended
+The narrow seams are already owned by FIEL-FR-12; no additional test-framework migration is necessary.
+Nice to Rewrite if Time Permits
+Method-name spelling/unused fixture members may be cleaned up with the test repair; they are not separate priority tickets.
+4.5 Root/support documentation
+MustChange / Rewrite
+No additional root-file defect beyond the shared build dependency in FIEL-FR-14.
+Rewrite Recommended
+No independent root-level architecture refactoring is required.
+Nice to Rewrite if Time Permits
+FIEL-FR-13 - Replace the template README with a service-specific operating guide
+Category: NiceToRewrite_ifTimePermits. Severity: Minor. Checklist: sections 12/15.
+Location: README.md:5 (../../SPEI_SPID/SPID_FIEL/README.md#L5).
+Current opening:
+Code block (text)
+## Getting started
+To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+The complete README is the GitLab template, not instructions for this service. A new maintainer cannot identify the required shared-binary version, central configuration source, SOAP/SQL contract owners, schedule/timezone policy, recovery steps, or verified build/test/deployment procedure from it.
+Fix: replace it with verified, owner-approved service guidance. A suitable structure is:
+Code block (text)
+Purpose and runtime flow
+Approved build prerequisites and dependency provenance
+Configuration keys, units, owners and secret-handling policy
+Build/test and Windows-service deployment/rollback
+Failure recovery, observability and contract references
+Do not invent missing settings or put actual credentials/customer payloads in documentation. Remove unrelated repository-setup examples, including force-push examples, from the service operating guide.
+Benefit / verification: a new maintainer follows the guide in an approved non-production environment and identifies build/deployment/recovery prerequisites without guessing. The current audit/handover pack is a starting point, not an owner-approved production runbook.
+5. Architecture-Fit Note
+Apply the canonical control's standing architecture guidance (./_ORCHESTRATION.md): fix actual defects, protect behavior with tests, reduce duplication, then evaluate hosting separately.
+The known workload is a timer-driven sequential read/query/update integration worker. It already has layered projects, constructor injection and a central Windows-service lifecycle. There is no demonstrated inbound API, durable queue trigger, scaling bottleneck, or multi-step financial saga that would by itself justify microservices or a workflow engine.
+Option	Fit for the known workload	Conditions / trade-offs
+Keep the current Windows Service and harden it	Best-supported near-term path	Fix clone/result/cleanup/protocol/logging defects; make cancellation and dependency delivery reliable; lowest behavioral migration risk
+Move to a supported modern .NET LTS Worker Service	Plausible later modernization	First verify shared MUFG library/API/package compatibility, Windows/native dependencies, deployment support and regression coverage; select the supported version at decision time
+Queue/event-driven processing	Only if upstream can publish durable pending-work events	Requires an actual event source, ownership, duplicate handling, backpressure and recovery policy; none is established here
+Scheduled/serverless execution	Possible for measured short, stateless, infrequent batches	Need measured duration/volume, network access, SQL/certificate constraints, cold-start tolerance and cost/SLA evidence
+Workflow/saga engine or full microservices rewrite	Not justified by this source audit alone	No proven long-running compensating workflow or independent scaling/team boundary; added operational complexity would precede evidence
+
+Unknowns requiring owner decisions: valid SOAP field/status contract and SOAPAction requirements; database procedure semantics/identity limits; endpoint HTTPS/TLS/redirect policy; FIEL data classification and log retention; schedule/overnight/timezone rules; idempotency and partial-batch retry policy; volume/latency/availability SLA; deployment constraints and budget.
+Do not infer an overnight-window defect without an overnight requirement, demand EF/UoW merely because the baseline mentions them, claim remote calls need a long-running database transaction, or select an architecture based on file count.
+Ruled-out or context-only concerns
+• Shared startup validates process metadata and serializes ticks. The confirmed PID defect is the local early clone, not a generic missing base lifecycle.
+• Nullable business-day/operation flags have non-null defaults, and business-day retrieval returns bool. Their normal casts are not reported as unguarded-null defects.
+• Shared ObtenerHoraSistema uses the same local machine clock family as DateTime.Now; no database-clock/machine-clock mismatch is asserted.
+• Both FirstOrDefault results are null-propagated. The SQL query here is not an EF left-join case.
+• Current shared Logging ignores the legacy filename argument. The copied SPID_Accionistas argument in finalization logging is cleanup debt, not evidence of misrouted log files.
+• No production endpoint value or WSDL is available, so HTTP plaintext transport, missing required SOAPAction, certificate bypass, package vulnerability, SQL index absence and invalid stored-procedure names are not asserted as findings.
+• The inherited shared ServiceName-on-start candidate remains a central dependency note under GEN-14. It is not duplicated as a SPID_FIEL-local defect, and no SCM test was performed.
+Source-audit disposition
+Overall source risk: High. Business criticality remains provisionally High; actual payment movement/SLAs were not established. Source findings are high-confidence where the trigger and shared contract are shown; production occurrence and deployed dependency equivalence remain unverified.
+Production readiness: not certified. Do not use this report as deployment approval. Resolve the eight checklist Blockers, repair/run regression tests, establish a reproducible build, validate contracts on approved non-production infrastructure, and obtain owner/release approval. This is not a claim that the currently deployed service is unavailable.
+6. JIRA-Ready Backlog
+One row per distinct finding. Priority uses the confirmed checklist severity; implementation acceptance criteria are in the corresponding finding above.
+ID	Title	Category	Project	File(s)	Priority
+FIEL-FR-1	Preserve initialized process identity in the resolved service configuration	MustChange/rewrite	SPID_FIEL	ServiceHost.cs (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs)	Blocker
+FIEL-FR-2	Finalize every tick after execution marking, including pre-processing failures	MustChange/rewrite	Aplicacion	OperacionServicio.cs (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs)	Blocker
+FIEL-FR-3	Propagate failed SQL query/update and partial-batch outcomes	MustChange/rewrite	Infraestructura	OperacionesRepositorio.cs (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs), ConsultaCamposBDTomi.cs (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/ConsultaCamposBDTomi.cs)	Blocker
+FIEL-FR-4	Verify finalization results before reporting successful cleanup	MustChange/rewrite	Infraestructura / host	ConsultaCamposBDTomi.cs (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/ConsultaCamposBDTomi.cs), ServiceHost.cs (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs)	Blocker
+FIEL-FR-5	Validate typed SOAP success/fault/namespace shape before terminal persistence	MustChange/rewrite	Infraestructura / Aplicacion	OperacionesRepositorio.cs (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs), ValidadorRespuestaFiel.cs (../../SPEI_SPID/SPID_FIEL/Aplicacion/Servicios/ValidadorRespuestaFiel.cs)	Blocker
+FIEL-FR-6	Minimize customer FIEL and raw SOAP data in routine logs	MustChange/rewrite	Infraestructura	OperacionesRepositorio.cs (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs)	Blocker
+FIEL-FR-9	Preserve primary exceptions and isolate secondary alert failures	MustChange/rewrite	Aplicacion / Infraestructura	OperacionServicio.cs (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs), OperacionesRepositorio.cs (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs)	Blocker
+FIEL-FR-14	Publish/consume an approved versioned MUFG_T24 dependency (GEN-1)	MustChange/rewrite	All four projects	Solution projects (../excecutive_docs/SPID_FIEL/Base_Project_Dependency_Ladder.md)	Blocker
+FIEL-FR-7	Propagate cancellation through SQL, HTTP body reads and the FIEL loop	MustChange/rewrite	Application / infrastructure / host	Operation contract (../../SPEI_SPID/SPID_FIEL/Aplicacion/Interfaces/IOperacionServicio.cs), repository (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs), host (../../SPEI_SPID/SPID_FIEL/SPID_FIEL/ServiceHost.cs)	Major
+FIEL-FR-8	Validate and honor the configured web-service timeout	MustChange/rewrite	Application / infrastructure	Configuration (../../SPEI_SPID/SPID_FIEL/Aplicacion/Modelos/ConfiguracionServicio.cs), transport (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs)	Major
+FIEL-FR-10	Validate FIEL identity length instead of truncating the update key	MustChange/rewrite	Infraestructura	OperacionesRepositorio.cs (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs)	Major
+FIEL-FR-11	Repair test fixture keys and add deterministic negative/failure assertions	MustChange/rewrite	PruebasUnitarias	SpidFielUT.cs (../../SPEI_SPID/SPID_FIEL/PruebasUnitarias/SpidFielUT.cs)	Major
+FIEL-FR-12	Extract narrow transport/parser/alert seams and share failure reporting	rewrite_recommended	Aplicacion / Infraestructura	OperacionServicio.cs (../../SPEI_SPID/SPID_FIEL/Aplicacion/OperacionServicio.cs), OperacionesRepositorio.cs (../../SPEI_SPID/SPID_FIEL/Infraestructura/Repositorio/OperacionesRepositorio.cs)	Major
+FIEL-FR-13	Replace template README with verified build/operation/recovery guidance	NiceToRewrite_ifTimePermits	Root support	README.md (../../SPEI_SPID/SPID_FIEL/README.md)	Minor
+
+Implementation sequence and release gates
+1. Reproduce and protect: obtain approved versioned dependencies/toolchain (FIEL-FR-14), repair the existing fixture (FIEL-FR-11), and add failing regression cases for the confirmed defects.
+2. Release blockers: fix identity lifetime, finalization scope/results, SQL-result propagation, SOAP validation, raw payload logging and exception preservation (FIEL-FR-1/2/3/4/5/6/9).
+3. Reliability: implement cancellation, measured configured timeouts and identity-length validation (FIEL-FR-7/8/10); verify stop during each I/O stage and partial failure.
+4. Maintainability: extract only the seams needed for deterministic tests and shared error reporting (FIEL-FR-12), then complete the owner-approved operating guide (FIEL-FR-13).
+5. Production hardening: run clean build/tests plus approved endpoint/SQL/SCM scenarios, validate sanitized telemetry and rollback, then seek release approval. Hosting modernization is a separate evidence-based decision.
+The audit itself makes documentation changes only; none of these remediation tickets has been implemented.
