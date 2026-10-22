@@ -1,0 +1,315 @@
+CEP ControladorServicios Recommendations
+CEP_ControladorServicios - Architecture & Code Quality Recommendations
+Date: 2026-10-14. Solution: CEP_ControladorServicios.sln (../../SPEI_SPID/CEP_ControladorServicios/CEP_ControladorServicios/CEP_ControladorServicios.sln). Compared against the coding-practices baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR technical/severity checklist (../BaseLine_Docs/code_review.md). See _ORCHESTRATION.md (./_ORCHESTRATION.md) for methodology and standing findings. Evidence: exhaustive progress log (./_CEP_ControladorServicios_ExhaustiveReview_Progress.md) and source manifest (./_CEP_ControladorServicios_FileManifest.csv).
+1. Solution Overview
+Tier	Project	Kind	Path relative to repository
+0	Aplicacion	Application/control library	Aplicacion\Aplicacion.csproj
+1	Infraestructura	TOMI repository library	Infraestructura\Infraestructura.csproj
+2	CEP_ControladorServicios	Windows Service executable	CEP_ControladorServicios\CEP_ControladorServicios.csproj
+
+What this solution actually does: it periodically reconciles four local Windows Services with TOMI business-day and operating-window settings. It starts or stops the SPEI CEP generator, SPID CEP generator, SPID FIEL and SPID Accionistas services, records execution bookkeeping and raises control-error alerts. It is a supervisor, not the generator or payment-message processor. All projects target .NET Framework 4.8 / x86. Simple Injector provides scoped dependencies; the host derives from shared MUFG_T24 lifecycle code. The current understanding (../architecture/CEP_ControladorServicios/Application_understanding_technical_document.md) and dependency ladder (../excecutive_docs/CEP_ControladorServicios/Base_Project_Dependency_Ladder.md) contain the complete composition and runtime map.
+2. Scope & Methodology Note
+Every line of every non-Git file was read, not sampled: 24 files / 2,499 physical lines. HEAD: 3dbf024399569216e4b2c6a8567b88d1824e7821; working tree clean and all source hashes unchanged.
+Batch	Files	Lines	Coverage
+First checkpoint: Aplicacion	11	695	Full read
+Continuation: Infraestructura	3	326	Full read
+Continuation: host folder, including solution/ignore file	8	901	Full read
+Continuation: root README and ignore file	2	577	Full read
+Total	24	2,499	Complete
+
+The user explicitly authorized continuing until the selected solution was finished; projects were completed sequentially with persisted checkpoints. Quantified scans supplement full reads. Shared MUFG_T24 source was inspected only to verify effective contracts, not audited in full or used as a finding location. The deployed DLL is absent and may differ from this source. No SQL scripts are included here; schema, stored-procedure internals, plans and permissions remain outside verified scope.
+This is not a changed-lines PR review. No work item or business acceptance criteria was supplied; the user approved an implementation audit without claiming requirement conformance. The baseline has empty evidence/count slots: its stated practices are used, not its unsupported coverage claims. The skill's six-section architecture template governs this report; the PR checklist supplies applicable technical rules and Blocker/Major/Minor severities.
+Review Outcome and Verification Limits
+16 distinct findings: eight MustChange/rewrite, six rewrite_recommended and two NiceToRewrite_ifTimePermits. Severity: two Blocker, 12 Major and two Minor. All are open; no production code was changed. P1/P2/P3 below are backlog priorities, not claims of active incidents. No CVSS score, production approval, measured coverage percentage or guessed quality score is assigned.
+• Exact-source isolated schedule-guard probe accepted negative and 24-hour values but rejected
+null, confirming CEP-A1. Logger/config were stubbed; no SCM/database action ran.
+• An isolated exception-semantics experiment confirmed cleanup can mask the primary failure;
+source inspection located the corresponding finally rethrow. Not a full application test.
+• Limited Framework MSBuild ResolveAssemblyReferences probe exited zero but fell back from
+toolset 15 to 4 and warned MSB3644: .NET Framework 4.8 reference assemblies were not found. This is NOT a successful target-framework build or proof of dependency resolution.
+• D:\ServiceCMS\MUFG_T24.dll and D:\ServiceCMS\SimpleInjector.dll are absent.
+Modern toolchain/targeting pack and approved shared dependencies are prerequisites to full Debug/Release build verification. No package restore or software installation was attempted.
+• No test project/framework/test attribute exists in this repository. No application suite or
+coverage run can be claimed. No real service start/stop, database operation or deployment ran.
+Quantified Cross-Checks
+Four absolute DLL HintPaths; six application schedule-parser branches; four start and four stop dispatch call sites; two similar alert construction blocks; two awaited Task.Run control wrappers; one local-clock sample. Fifteen broad catches and 11 bare rethrows appear in the 16 C# files; two message-only new Exception throws require contextual interpretation. No throw ex; or synchronous task-result wait was found in this solution's source. Crypto-pattern scans found no MD5/SHA1/DES/3DES/ECB use. Secret-marker matches were cancellation token identifiers, not credential values. These checks do not certify external DLLs.
+3. What's Already Good
+Strength	Evidence / significance
+Real interfaces and constructor injection	OperacionServicio.cs:35 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L35) receives repository/controller/configuration; do not add DI as though absent
+Scoped composition root	ServiceHost.cs:81 (../../SPEI_SPID/CEP_ControladorServicios/CEP_ControladorServicios/ServiceHost.cs#L81) registers configuration, repository and operations; each tick opens an async scope
+Required parameters checked before SCM actions	OperacionServicio.cs:117 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L117) verifies presence of six required schedules
+Control resources disposed; bounded SCM waits	ControladorServicios.cs:46 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Service/ControladorServicios.cs#L46) uses ServiceController in using; status waits are 30 seconds
+All four control tasks awaited	OperacionServicio.cs:183 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L183) awaits Task.WhenAll, not fire-and-forget
+Errors already logged/alerted	ControladorServicios.cs:61 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Service/ControladorServicios.cs#L61) logs control failure and inserts an alert; CEP-A6 is not absence of all diagnostics
+Parameterized persistence	RepositorioTomi.cs:64 (../../SPEI_SPID/CEP_ControladorServicios/Infraestructura/servicio/RepositorioTomi.cs#L64) builds DB parameters rather than concatenating SQL
+Startup identity and tick serialization	Verified shared startup awaits parametrization and validates identity before timer start; tick semaphore prevents overlap. The service does not break those guarantees
+Derived clone remains derived	Verified MemberwiseClone preserves ConfiguracionServicio runtime type; scoped PID copies the initialized host PID
+
+No controller-disposal leak, missing required schedule-presence check, constructor/designer service-name defect or uninitialized production PID was found. The nullable-result expression in repository termination is confusing but the current shared call returns a non-null result or throws; do not elevate an unreachable null path to a runtime blocker.
+4. Findings by Project
+4.1 Aplicacion - Tier 0
+MustChange / Rewrite
+CEP-A1 - Validate time-of-day domain, not just presence
+Severity: Blocker. Category: MustChange/rewrite. Checklist sections 3/4. Location: OperacionServicio.cs:223 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L223); six parser calls begin at line 58.
+Code block (csharp)
+if (valor.HasValue) return;
+The shared invariant TimeSpan parser accepts -01:00:00 and 1.00:00:00; this application treats the values as daily schedule boundaries. Presence-only validation admits an invalid lower/upper daily bound and can run controlled services outside a meaningful daily window. The exact original guard accepted both values in isolation.
+Code block (csharp)
+if (valor.HasValue && valor.Value >= TimeSpan.Zero &&
+    valor.Value < TimeSpan.FromDays(1))
+    return;
+Config.EscribirLog(mensaje, _configuracion.StrNombreServicio);
+throw new InvalidOperationException(mensaje);
+Fix/benefit: reject malformed daily times before SCM actions, with parameter-specific logging. Test null, negative, zero, valid last-second time, 24 hours and multi-day values. Confirm any end-of-day sentinel/overnight policy before choosing a different domain; do not silently reinterpret 24 hours. Suggested JIRA: CEP-A1 (P1).
+CEP-A2 - Preserve both work and cleanup failures
+Severity: Major. Category: MustChange/rewrite. Checklist section 5. Location: OperacionServicio.cs:191 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L191).
+Code block (csharp)
+catch (Exception exFinally)
+{
+    Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|no fue posible maracar el servicio en finalización: {exFinally}");
+    throw;
+}
+This catch is inside the finally block. When main work and cleanup both fail, the latter replaces the former for the caller. The earlier log still contains the original; do not claim all evidence is lost.
+Code block (csharp)
+// Proposed cleanup catch, with primaryFailure captured by the main catch:
+if (primaryFailure == null)
+    throw;
+throw new AggregateException(
+    "Operation and cleanup failed.", primaryFailure, cleanupFailure);
+Fix/benefit: retain both causes, or log the secondary failure and preserve the original according to an explicit error policy. Test primary-only, cleanup-only and dual failures. Suggested JIRA: CEP-A2 (P1).
+CEP-A3 - Handle SCM pending states explicitly
+Severity: Major. Category: MustChange/rewrite. Checklist sections 3/20. Locations: ControladorServicios.cs:49 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Service/ControladorServicios.cs#L49) and ControladorServicios.cs:91 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Service/ControladorServicios.cs#L91).
+Code block (csharp)
+if (serviceController.Status != ServiceControllerStatus.Running)
+    // Start and wait.
+if (serviceController.Status != ServiceControllerStatus.Stopped &&
+    serviceController.Status != ServiceControllerStatus.StopPending)
+    // Stop and wait.
+StartPending/StopPending are not reconciled before a new Start; StartPending may receive an unsupported Stop. The stop path skips StopPending without observing Stopped. A prior timeout or operator action can expose these states without overlapping timer ticks.
+Code block (csharp)
+// Proposed start-path state handling:
+case ServiceControllerStatus.StartPending:
+    return await WaitForRunningAsync(ct);
+case ServiceControllerStatus.StopPending:
+    await WaitForStoppedAsync(ct);
+    break;
+Fix/benefit: use a testable SCM adapter, one bounded deadline, explicit all-state handling, and an owner-approved paused/continue policy. Provide a symmetrical stop path; proposed wait helpers are not existing APIs. Test all seven SCM states and timeout. Suggested JIRA: CEP-A3 (P1).
+CEP-A4 - Add deterministic regression tests for supervision
+Severity: Major. Category: MustChange/rewrite. Checklist section 13; standing GEN-2. Location: OperacionServicio.cs:135 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L135).
+Code block (csharp)
+public async Task EjecutaProcedimiento()
+There is no checked-in test project/framework/test attribute for the four service decisions. This is not a measured 0% coverage result or proof that external testing never occurs.
+Code block (csharp)
+// Proposed test arrangement, with fake dependencies only:
+var sut = new OperacionServicio(fakeRepository, initializedConfig, fakeController);
+await sut.EjecutaProcedimiento();
+// Assert all four service names, desired states and bookkeeping.
+Fix/benefit: add approved automated tests with actual assertions for business-day rules, all four mappings, schedule boundaries, missing/invalid settings, pending states, failed transitions and dual cleanup failure. Inject clock/SCM seams; never hit TOMI or real services from unit tests. This is the required safety net for remediation. Suggested JIRA: CEP-A4 (P1).
+CEP-A5 - Package external dependencies reproducibly
+Severity: Blocker. Category: MustChange/rewrite. Checklist section 11; standing GEN-1. Locations: Aplicacion.csproj:37 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Aplicacion.csproj#L37), Infraestructura.csproj:37 (../../SPEI_SPID/CEP_ControladorServicios/Infraestructura/Infraestructura.csproj#L37) and host project:42 (../../SPEI_SPID/CEP_ControladorServicios/CEP_ControladorServicios/CEP_ControladorServicios.csproj#L42).
+Code block (xml)
+<HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+Four absolute HintPaths span the three projects: three MUFG_T24 and one host SimpleInjector. Both expected DLLs are absent; no portfolio nuget.config or MUFG-named package archive was found. This is a raw-file build convention, not a verified feed-based restore.
+Code block (xml)
+<!-- Schematic only: use an approved, published ID and real pinned version. -->
+<PackageReference Include="MUFG_T24" Version="APPROVED_VERSION" />
+Fix/benefit: publish the shared library and its dependencies to the approved internal feed, pin versions, package SimpleInjector through the approved channel and verify x86 Framework 4.8 Debug/Release builds. Do not paste placeholder versions or merely change one drive path. One consolidated ticket, not four duplicates. Suggested JIRA: CEP-A5 (P1).
+Rewrite Recommended
+CEP-A6 - Distinguish transition no-op, success and failure
+Severity: Major. Category: rewrite_recommended. Checklist sections 3/12/14b. Locations: IControladorServicios.cs:19 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Interfaces/IControladorServicios.cs#L19) and OperacionServicio.cs:183 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L183).
+Code block (csharp)
+Task<bool> IniciaServicioAsync(string strNombreServicio);
+await Task.WhenAll(tareas); // bool[] discarded.
+False denotes both already-at-target and a caught error. Existing alerts remain valuable, but the caller cannot summarize reconciled service health unambiguously.
+Code block (csharp)
+public enum ServiceTransitionResult { AlreadyAtTarget, ReachedTarget, Failed }
+// Proposed: Task<ServiceTransitionResult> per control operation.
+Fix/benefit: return named per-service outcomes, collect all four and expose partial failure without classifying idempotent no-op as failure. Preserve alerting; decide host-level degraded cycle policy. Bookkeeping termination alone does not assert successful reconciliation. Suggested JIRA: CEP-A6 (P2).
+CEP-A7 - Propagate cooperative shutdown cancellation
+Severity: Major. Category: rewrite_recommended. Checklist section 6. Locations: IOperacionServicio.cs:17 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Interfaces/IOperacionServicio.cs#L17), ControladorServicios.cs:52 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Service/ControladorServicios.cs#L52) and ServiceHost.cs:137 (../../SPEI_SPID/CEP_ControladorServicios/CEP_ControladorServicios/ServiceHost.cs#L137).
+Code block (csharp)
+Task EjecutaProcedimiento();
+// Start/Stop use awaited Task.Run plus a synchronous 30-second WaitForStatus.
+The host token is not passed into application/repository/control work. Shutdown cannot prevent later requests or interrupt waiting through these contracts. Four waits run concurrently; this is not a guaranteed serial 120-second delay.
+Code block (csharp)
+Task EjecutaProcedimiento(CancellationToken ct);
+Task<ServiceTransitionResult> IniciaServicioAsync(string serviceName, CancellationToken ct);
+Fix/benefit: wire tokens through every layer and use bounded cancellation-aware status polling behind the adapter. Passing a token only to Task.Run does not stop an executing WaitForStatus. Keep cleanup tokens separate and define policy for already-issued SCM requests. Suggested JIRA: CEP-A7 (P2).
+CEP-A8 - Define an injectable business clock and precision
+Severity: Major. Category: rewrite_recommended. Checklist sections 13/14. Location: OperacionServicio.cs:113 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L113).
+Code block (csharp)
+var horaActual = DateTime.Now;
+_configuracion.StrFechaSistemaServicio =
+    new TimeSpan(horaActual.Hour, horaActual.Minute, 0);
+Host-local time and minute truncation are implicit while parser inputs may contain seconds. A 09:00:30 start will not be reached until the sample becomes 09:01. Actual business intent is unknown; this is not proof that minute semantics or local time is inherently wrong.
+Code block (csharp)
+public interface IBusinessClock { DateTimeOffset Now { get; } }
+Fix/benefit: agree the business zone/precision, convert a single sampled instant and make clock/calendar tests deterministic. Preserve current semantics until approved otherwise; reject unsupported precision if appropriate. Do not compare local daily windows directly against raw UTC or invent overnight support. Suggested JIRA: CEP-A8 (P2).
+CEP-A9 - Consolidate repeated dispatch and alerts
+Severity: Major. Category: rewrite_recommended. Checklist section 12. Locations: OperacionServicio.cs:163 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L163) and ControladorServicios.cs:65 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Service/ControladorServicios.cs#L65).
+Code block (csharp)
+bolPuedeIniciarOP
+    ? _controlador.IniciaServicioAsync(EnumComunes.SPEI_CEP_GEN_CDA)
+    : _controlador.DetieneServicioAsync(EnumComunes.SPEI_CEP_GEN_CDA)
+Four start/stop dispatch pairs, four similar window/log blocks, six parse branches and two similar alert construction blocks create copy/paste divergence points, not proven present divergent behavior.
+Code block (csharp)
+// Proposed small schedule table and shared reconciliation seam:
+foreach (var schedule in schedules)
+    tasks.Add(ReconcileAsync(schedule, businessDay, now, ct));
+await Task.WhenAll(tasks);
+Fix/benefit: use one explicit four-row schedule mapping/window helper and one alert factory. Apply CEP-A1/A6/A7/A8 at these seams. Preserve individual starts, shared SPID end, names and four-way concurrency; no large strategy framework or new ORM/UoW is needed. Suggested JIRA: CEP-A9 (P2).
+Nice to Rewrite if Time Permits
+CEP-N2 - Retire or document unused compatibility surface
+Severity: Minor. Category: NiceToRewrite_ifTimePermits. Checklist section 12. Locations: OperacionServicio.cs:214 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/OperacionServicio.cs#L214) and IRepositorioTomi.cs:21 (../../SPEI_SPID/CEP_ControladorServicios/Aplicacion/Interfaces/IRepositorioTomi.cs#L21).
+Code block (csharp)
+public async Task ProcesoActualizaPuertoEnUso(int intpId, string strNombreProceso,
+    string strNombreServicio, string strServicio) =>
+    await _repositorioTomi.ActualizaPuertoEnUso(
+        intpId, strNombreProceso, strNombreServicio, strServicio);
+This existing pass-through has no caller in this solution. Free-port, port-in-use and system-date repository capabilities also have no reachable production call from this host; lifecycle instead uses IControlServicio.
+Code block (csharp)
+// Proposed contract cleanup only after owner confirmation:
+// Remove unused members and their implementations together;
+// otherwise keep them and add compatibility documentation/tests.
+Fix/benefit: confirm external consumers before deleting paths/DTOs/constants. Reduce unneeded maintenance/testing without breaking public compatibility. Suggested JIRA: CEP-N2 (P3).
+4.2 Infraestructura - Tier 1
+MustChange / Rewrite
+CEP-I1 - Do not convert a failed query into configuration data
+Severity: Major. Category: MustChange/rewrite. Checklist sections 5/8/11. Location: RepositorioTomi.cs:153 (../../SPEI_SPID/CEP_ControladorServicios/Infraestructura/servicio/RepositorioTomi.cs#L153).
+Code block (csharp)
+if (resultadoSp?.Data == null) return new Dictionary<string, string>();
+return resultadoSp.Data
+    .Where(x => x != null && !string.IsNullOrWhiteSpace(x.Id_parametro))
+    .GroupBy(x => x.Id_parametro)
+    .ToDictionary(x => x.Key, x => x.LastOrDefault()?.Valor ?? string.Empty);
+The verified current shared query helper catches SQL failure into Exito=false, MensajeError and Exception. Non-strict query mode returns that result; Data is initialized as an empty list. This method never checks Exito, so a SQL failure becomes an empty dictionary and then a misleading missing-parameter error in the application. Partial data can also be accepted without success validation. No database execution was needed to establish this path.
+Code block (csharp)
+if (resultadoSp == null || !resultadoSp.Exito || resultadoSp.Data == null)
+{
+    Config.EscribirLog(
+        $"ERROR|ObtenerParametrosSistema|{resultadoSp?.MensajeError}",
+        _configuracion.StrNombreServicio);
+    throw new InvalidOperationException(
+        "Failed to obtain supervisor schedule parameters.", resultadoSp?.Exception);
+}
+Fix/benefit: preserve failed-query status and causal exception before mapping; successful empty data still gets required-key validation. Test SQL failure with empty and populated Data, null result, successful empty and successful valid data. Suggested JIRA: CEP-I1 (P1).
+Rewrite Recommended
+CEP-I2 - Make duplicate-parameter policy explicit
+Severity: Major. Category: rewrite_recommended. Checklist sections 3/11/12. Location: RepositorioTomi.cs:159 (../../SPEI_SPID/CEP_ControladorServicios/Infraestructura/servicio/RepositorioTomi.cs#L159).
+Code block (csharp)
+.GroupBy(x => x.Id_parametro)
+.ToDictionary(x => x.Key, x => x.LastOrDefault()?.Valor ?? string.Empty);
+Conflicting values silently select the last returned row, with no ordering/version rule. No included SQL script establishes a uniqueness guarantee. This is an ambiguous data contract, not an assertion that production currently returns duplicates.
+Code block (csharp)
+if (group.Select(x => x.Valor).Distinct(StringComparer.Ordinal).Count() > 1)
+    throw new InvalidOperationException("Conflicting schedule parameter values.");
+Fix/benefit: use contextual logging and reject conflicting keys, or implement a documented owner-approved ordering/version policy. Test identical/conflicting duplicates and key casing according to the actual database contract. Do not silently switch case sensitivity. Suggested JIRA: CEP-I2 (P2).
+CEP-I3 - Retain structured causes when raising repository errors
+Severity: Major. Category: rewrite_recommended. Checklist section 5. Locations: RepositorioTomi.cs:227 (../../SPEI_SPID/CEP_ControladorServicios/Infraestructura/servicio/RepositorioTomi.cs#L227) and RepositorioTomi.cs:186 (../../SPEI_SPID/CEP_ControladorServicios/Infraestructura/servicio/RepositorioTomi.cs#L186).
+Code block (csharp)
+private void MensajeThrow(string mensaje)
+{
+    Config.EscribirLog(mensaje, _configuracion.StrNombreServicio);
+    throw new Exception(mensaje);
+}
+Callers that already have StoredProcedureResult.Exception serialize it into a message and replace the typed causal chain with a generic message-only exception. Message-only errors with no prior cause are not automatically stack-destruction defects.
+Code block (csharp)
+private void MensajeThrow(string mensaje, Exception innerException = null)
+{
+    Config.EscribirLog(mensaje, _configuracion.StrNombreServicio);
+    throw new InvalidOperationException(mensaje, innerException);
+}
+Fix/benefit: pass the actual retained cause at error-result call sites; keep context and type/stack for diagnosis. Coordinate CEP-I1 rather than introducing a second exception layer. Suggested JIRA: CEP-I3 (P2).
+Nice to Rewrite if Time Permits
+No additional distinct finding. Unused compatibility capabilities are consolidated in CEP-N2; DLL packaging in CEP-A5. The null-coalescing termination predicate may be simplified when touched but no reachable null failure was verified in the current shared contract.
+4.3 CEP_ControladorServicios Host - Tier 2
+MustChange / Rewrite
+CEP-H1 - Do not equate a bounded wait with task completion
+Severity: Major. Category: MustChange/rewrite. Checklist sections 6/7/20. Location: ServiceHost.cs:165 (../../SPEI_SPID/CEP_ControladorServicios/CEP_ControladorServicios/ServiceHost.cs#L165); unconditional container disposal at line 187.
+Code block (csharp)
+await _controlServicio.EsperarTareaActivaAsync(
+    runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+// Clear registration and mark termination, then dispose the container in finally.
+Effective shared waiting code logs and returns when the wait token expires; it does not guarantee completion or throw cancellation on that path. Startup/tick tasks can therefore remain active while this host clears registration, claims termination and disposes lifetime resources. The current base allows a 60-second wait and 30-second cleanup budget; these are source defaults, not a measured shutdown SLA. This is distinct from CEP-A7's missing cooperative cancellation, which increases exposure.
+Code block (csharp)
+// After both bounded waits:
+if (startupTask?.IsCompleted == false || runningTask?.IsCompleted == false)
+{
+    // Log a distinct timeout/degraded result.
+    // Do not claim normal quiescence or execute unsafe lifetime disposal.
+}
+Fix/benefit: implement an explicit timed-out shutdown branch, coordinated with the base host's bounded SCM contract. Defer disposal of resources used by active tasks to an approved completion/ownership mechanism; separate actual process exit cleanup from normal quiescence. Do not turn the SCM stop into an infinite wait or rely on an early return while leaving unconditional disposal in finally. Test a deliberately incomplete startup/task after the wait expires, normal completion and canceled cleanup. Suggested JIRA: CEP-H1 (P1).
+CEP-H2 - Check persistence outcomes before logging shutdown success
+Severity: Major. Category: MustChange/rewrite. Checklist sections 5/8/14b. Location: ServiceHost.cs:169 (../../SPEI_SPID/CEP_ControladorServicios/CEP_ControladorServicios/ServiceHost.cs#L169).
+Code block (csharp)
+await _controlServicio.MarcarPuertoEnUsoAsync(
+    null, null, null, _configuracionBase.NombreServicio, cleanupCt);
+await _controlServicio.ActualizaTerminacion(
+    _configuracionBase.NombreServicio, cleanupCt);
+Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
+The current shared compatibility marker can return false on a non-success result; termination can catch a database exception into a non-null Exito=false result. This host discards both results and unconditionally emits success. Earlier shared errors may be logged, but the service's positive summary contradicts unsuccessful persistence.
+Code block (csharp)
+bool marked = await control.MarcarPuertoEnUsoAsync(
+    null, null, null, serviceName, cleanupCt);
+var terminated = await control.ActualizaTerminacion(serviceName, cleanupCt);
+if (!marked || terminated?.Exito != true)
+    throw new InvalidOperationException(
+        "Shutdown bookkeeping failed.", terminated?.Exception);
+// Emit success only after these checks.
+control and serviceName denote the existing resolved dependency/service name. Fix/benefit: report failed/degraded shutdown accurately, retain causes and attempt independent cleanup steps per agreed policy. Do not generalize this to "all optional shared return values must be checked": the concrete defect is this unconditional success claim. Test marker false, termination false, both successful and exceptions/cancellation. Suggested JIRA: CEP-H2 (P1).
+Rewrite Recommended
+No separate host ticket. Token propagation and packaging are already covered by CEP-A7/A5. A broad catch at this host boundary logs failures and is not itself a silent-catch defect.
+Nice to Rewrite if Time Permits
+CEP-N1 - Replace the template README with an operational guide
+Severity: Minor. Category: NiceToRewrite_ifTimePermits. Checklist sections 13/15. Location: README.md:5 (../../SPEI_SPID/CEP_ControladorServicios/README.md#L5).
+Code block (text)
+## Getting started
+The README remains generic GitLab onboarding/template content, not instructions for this Windows Service. Its CI links do not establish that a pipeline is configured.
+Code block (text)
+Proposed sections: prerequisites; approved build/restore; external settings;
+SCM account/permissions; install/rollback; schedule semantics; health/alerts;
+safe test commands; support owner.
+Fix/benefit: document the actual operating procedure and avoid environment-dependent guesswork during support. This audit's handover is a starting point, not a substitute for owner-approved installation/rollback steps. Suggested JIRA: CEP-N1 (P3).
+5. Architecture-Fit Note
+Apply the standing architecture question in _ORCHESTRATION.md (./_ORCHESTRATION.md). This workload is bounded periodic local-SCM reconciliation, not a continuous payment listener or multi-step financial saga. A Windows Service is a reasonable fit. Correct defects, make dependencies reproducible and add tests before changing hosting.
+Option	Fits when	Trade-offs / unknowns
+Modernize current service in place	Local SCM control and existing operations remain required	Lowest disruption; requires safe shutdown, testing and dependency discipline
+Modern .NET Worker on Windows	Approved runtime/support lifecycle and Windows permissions allow it	Better hosting APIs; shared Framework dependencies may block migration
+Scheduled task	Bounded reconciliation cadence/recovery satisfies the SLA	Simpler lifetime; overlapping launches and missed runs need policy
+Event/message-driven supervision	Reliable lifecycle events and operational scale justify it	Introduces broker/event correctness; not automatically safer than four polling decisions
+Serverless	A secure, supported local agent can perform privileged SCM work	Cannot directly manage this host's SCM without an agent; added security/availability boundary
+Microservice/full rewrite	Separately justified ownership/scale/isolation requirement exists	Highest migration cost/risk; not justified by code quality alone
+
+Confirm SLAs, required cadence, Windows account privileges, hosting constraints, time-zone/ holiday authority, overnight/precision rules, deployment costs and rollback requirements. No single modernization target is mandated by this audit.
+6. JIRA-Ready Backlog
+IDs are stable from the checkpoint. All statuses are Open. File locations and concrete fixes are in the corresponding finding; each finding belongs to exactly one category.
+ID	Title	Category	Project	File(s)	Priority
+CEP-A1	Validate daily schedule domain	MustChange/rewrite	Aplicacion	OperacionServicio.cs:223	P1 - Blocker
+CEP-A2	Preserve operation and cleanup failures	MustChange/rewrite	Aplicacion	OperacionServicio.cs:191	P1 - Major
+CEP-A3	Reconcile pending SCM states	MustChange/rewrite	Aplicacion	Service\ControladorServicios.cs:49,91	P1 - Major
+CEP-A4	Add deterministic supervisor tests (GEN-2)	MustChange/rewrite	Aplicacion / solution	OperacionServicio.cs:135; solution	P1 - Major
+CEP-A5	Package dependencies reproducibly (GEN-1)	MustChange/rewrite	All three	Aplicacion.csproj:37; Infraestructura.csproj:37; host.csproj:42,45	P1 - Blocker
+CEP-A6	Return named transition outcomes	rewrite_recommended	Aplicacion	IControladorServicios.cs:19; OperacionServicio.cs:183	P2 - Major
+CEP-A7	Propagate cancellation across layers	rewrite_recommended	All three	IOperacionServicio.cs:17; ServiceHost.cs:137	P2 - Major
+CEP-A8	Define business clock/precision	rewrite_recommended	Aplicacion	OperacionServicio.cs:113	P2 - Major
+CEP-A9	Consolidate dispatch and alert construction	rewrite_recommended	Aplicacion	OperacionServicio.cs:163; ControladorServicios.cs:65	P2 - Major
+CEP-N2	Retire/document unused compatibility paths	NiceToRewrite_ifTimePermits	Aplicacion / Infraestructura	OperacionServicio.cs:214; IRepositorioTomi.cs:21	P3 - Minor
+CEP-I1	Reject failed configuration-query results	MustChange/rewrite	Infraestructura	servicio\RepositorioTomi.cs:153	P1 - Major
+CEP-I2	Validate duplicate parameter policy	rewrite_recommended	Infraestructura	servicio\RepositorioTomi.cs:159	P2 - Major
+CEP-I3	Preserve repository causal exceptions	rewrite_recommended	Infraestructura	servicio\RepositorioTomi.cs:227	P2 - Major
+CEP-H1	Separate timeout from completed shutdown	MustChange/rewrite	Host	ServiceHost.cs:165,187	P1 - Major
+CEP-H2	Validate shutdown persistence before success log	MustChange/rewrite	Host	ServiceHost.cs:169	P1 - Major
+CEP-N1	Write real service operational documentation	NiceToRewrite_ifTimePermits	Repository support	README.md:5	P3 - Minor
+
+Suggested Execution Order
+1. Restore approved build inputs/toolchain (CEP-A5); create the isolated test seams (CEP-A4).
+2. Fix schedule validation, SCM pending-state handling, repository result checks and causal
+failure handling (CEP-A1/A2/A3/I1); establish regression tests before changes.
+3. Coordinate host completion/timeout and truthful cleanup outcomes (CEP-H1/H2) with
+cancellation (CEP-A7). Verify in a controlled non-production environment.
+4. Improve named outcomes, clock, duplicate-parameter contract and shared implementation
+seams (CEP-A6/A8/A9/I2/I3), preserving approved behavior.
+5. Document/trim compatibility surfaces (CEP-N1/N2); then consider separately justified hosting
+modernization. Do not turn this recommendation backlog into an unapproved full rewrite.
+Required Evidence Before Deployment
+Approved pinned dependencies; Framework 4.8 x86 Debug/Release builds; deterministic automated tests; agreed schedule semantics; controlled SCM pending/timeout/restart/shutdown exercises; TOMI procedure/schema compatibility; least-privilege service account validation; log/alert verification; approved rollback. None is silently passed by completion of this static audit.
