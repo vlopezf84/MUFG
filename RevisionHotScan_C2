@@ -1,0 +1,3774 @@
+
+***********
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Utileria;
+using MUFG_T24.Comunes;
+using Newtonsoft.Json;
+using System;
+using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Clase para enviode token y envio por HTTP POST
+    /// </summary>
+    public class ClienteConectorUt: IClienteConectorUt
+    {
+        private readonly IRepositorioTomi _repositorioTomi;
+        private string _usuarioConectorUt;
+        private string _ContrasenaConectorUt;
+
+        private readonly HttpClient _httpClient;
+
+        private readonly SemaphoreSlim _semaforoInicializacion = new SemaphoreSlim(1, 1);
+        private bool _configuracionIniciada;
+
+        /// <summary>
+        /// Controlador.
+        /// </summary>
+        public ClienteConectorUt(IRepositorioTomi repositorioTomi)
+        {
+            _repositorioTomi = repositorioTomi;
+            _httpClient = new HttpClient();
+        }
+
+        /// <summary>
+        /// Obtiene token y envia solicitud conector por HTTP
+        /// </summary>
+        /// <param name="objRespuestaConector"></param>
+        /// <returns>RespuestaConectorUt</returns>
+        public async Task<RespuestaConectorUt> EnviarConectorUt(SolicitudConectorUt objRespuestaConector)
+        {
+            RespuestaConectorUt objRespuestaConectorUt = null;
+            try
+            {
+                await InicializarConfiguracionAsync();
+
+                // Serializa solicitud
+                string objSolicitudJson = JsonConvert.SerializeObject(objRespuestaConector);
+
+                // Convierte json a bytes
+                Config.EscribirLog("INFO|SendUTConector|Inicia envío UTConector con request: ************** con folio: " + objRespuestaConector.Folio, NombreServicio.HotScan.ToString());
+                byte[] arrSolicitud = Encoding.UTF8.GetBytes(objSolicitudJson);
+                
+                string url = (await _repositorioTomi.ObtenerConfiguracionGeneralHotScan(EnumComunes.CampoDireccionBaseConectorUt))?.FirstOrDefault()?.Valor + EnumComunes.ValidaPuertaSentinel;
+
+                Config.EscribirLog("INFO|SendUTConector| CREDENCIALES UT CARGADAS " + NombreServicio.HotScan.ToString());
+                Config.EscribirLog("INFO|SendUTConector|URL_API: " + url, NombreServicio.HotScan.ToString());
+
+                // Obtiene token
+                RespuestaAutenticacionConectorUt objToken = await ObtieneTokenAutorizacion(objRespuestaConector.Folio);
+
+                // Valida que exista token
+                if (objToken == null)
+                {
+                    Config.EscribirLog("Error|SendUTConector|GetAndValidateAuthorizationToken| " +
+                        "La respuesta del servicio de autenticación es nula", NombreServicio.HotScan.ToString());
+                    throw new Exception("No se recibió respuesta del servicio de autenticación");
+                }
+                if (string.IsNullOrWhiteSpace(objToken.Token))
+                {
+                    Config.EscribirLog($"Error|SendUTConector|GetAndValidateAuthorizationToken| Token vacío. Respuesta completa: " +
+                        $"{JsonConvert.SerializeObject(objToken)}", NombreServicio.HotScan.ToString());
+                    throw new Exception("El servicio de autenticación no devolvió un token válido");
+                }
+
+                Config.EscribirLog("INFO|SendUTConector|tokenResult.Token: " + objToken.Token, NombreServicio.HotScan.ToString());
+                // Crea peticion post http
+                HttpResponseMessage objRespuestaCliente = null;
+
+                using (var request = new HttpRequestMessage(HttpMethod.Post, url))
+                {
+                    request.Headers.Authorization = new AuthenticationHeaderValue(EnumComunes.EsquemaToken, objToken.Token);
+                    request.Content = new ByteArrayContent(arrSolicitud);
+                    request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+                    objRespuestaCliente = await _httpClient.SendAsync(request);
+                }
+                
+                // Valida respuesta
+                if (objRespuestaCliente != null && objRespuestaCliente.StatusCode == System.Net.HttpStatusCode.OK && objRespuestaCliente.Content != null)
+                {
+                    Config.EscribirLog("INFO|SendUTConector|response.StatusCode: " + objRespuestaCliente.StatusCode, NombreServicio.HotScan.ToString());
+                    
+                    var responseContent = await objRespuestaCliente.Content.ReadAsStringAsync();
+                    objRespuestaConectorUt = JsonConvert.DeserializeObject<RespuestaConectorUt>(responseContent);
+
+                    if (objRespuestaConectorUt != null)
+                    {
+                        Config.EscribirLog("INFO|SendUTConector|result.ToString(): "+ objRespuestaConectorUt,NombreServicio.HotScan.ToString());
+
+                        Config.EscribirLog("INFO|SendUTConector|result.Description: "+ objRespuestaConectorUt.Description,NombreServicio.HotScan.ToString());
+
+                        Config.EscribirLog("INFO|SendUTConector|result.Folio: "+ objRespuestaConectorUt.Folio,NombreServicio.HotScan.ToString());
+                    }
+
+                    Config.EscribirLog("INFO|SendUTConector|response.Content.ReadAsStringAsync: " + responseContent, NombreServicio.HotScan.ToString());
+                }
+
+                Config.EscribirLog("INFO|SendUTConector|Termina envío UTConector con response: " + objRespuestaCliente.Content + " con folio: " + objRespuestaConector.Folio, NombreServicio.HotScan.ToString());
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("Error|SendUTConector|Exception: " + ex.Message, NombreServicio.HotScan.ToString());
+                throw;
+            }
+            return objRespuestaConectorUt;
+        }
+
+        /// <summary>
+        /// Obtiene el token de autorizacion desde el conector UT
+        /// </summary>
+        /// <param name="folio"></param>
+        /// <returns>RespuestaAutenticacionConectorUt</returns>
+        private async Task<RespuestaAutenticacionConectorUt> ObtieneTokenAutorizacion(long folio)
+        {
+            RespuestaAutenticacionConectorUt objRespuestaAutenticacion = null;
+            try
+            {
+                // Carga credenciales
+                string strSolicitud = JsonConvert.SerializeObject(new SolicitudAutenticacionConectorUt
+                {
+                    UserName = _usuarioConectorUt,
+                    Password = _ContrasenaConectorUt
+                });
+
+                Config.EscribirLog("INFO|GetAuthorizationToken|Inicia solicitud de token de autorización con folio: " + folio, NombreServicio.HotScan.ToString());
+                Config.EscribirLog("INFO|GetAuthorizationToken|URLAPI Authenticate: " +
+                    (await _repositorioTomi.ObtenerConfiguracionGeneralHotScan(EnumComunes.CampoDireccionBaseConectorUt))?
+                    .FirstOrDefault()?.Valor + EnumComunes.Autenticar, NombreServicio.HotScan.ToString());
+
+                // Convierte el json a bytes
+                byte[] arrSolicitud = Encoding.UTF8.GetBytes(strSolicitud);
+                
+
+                // Carga direccion
+                string strDireccionBase = (await _repositorioTomi.ObtenerConfiguracionGeneralHotScan(EnumComunes.CampoDireccionBaseConectorUt))?
+                    .FirstOrDefault()?.Valor;
+
+                // Valida que exista url
+                if (string.IsNullOrWhiteSpace(strDireccionBase))
+                {
+                    throw new Exception("La configuración UTConnectorBaseAdress no está definida");
+                }
+
+                // Crea peticion post http
+                HttpResponseMessage objRespuestaMsj = null;
+                using (var request = new HttpRequestMessage(HttpMethod.Post, strDireccionBase + EnumComunes.Autenticar))
+                {
+                    request.Content = new ByteArrayContent(arrSolicitud);
+                    request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                    objRespuestaMsj = await _httpClient.SendAsync(request);
+                }
+
+                // Valida respuesta
+                if (objRespuestaMsj != null && objRespuestaMsj.StatusCode == System.Net.HttpStatusCode.OK && objRespuestaMsj.Content != null)
+                {
+                    objRespuestaAutenticacion = JsonConvert.DeserializeObject<RespuestaAutenticacionConectorUt>(await objRespuestaMsj.Content.ReadAsStringAsync());
+                }
+
+                Config.EscribirLog("INFO|GetAuthorizationToken|Termina solicitud de token de autorización con response: " +
+                    objRespuestaMsj?.Content + " con folio: " + folio, NombreServicio.HotScan.ToString());
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("Error|GetAuthorizationToken|Exception: " + ex.Message, NombreServicio.HotScan.ToString());
+                throw;
+            }
+            return objRespuestaAutenticacion;
+        }
+
+        /// <summary>
+        /// Se inicializa la configuracion de usuario y contrasena UT.
+        /// </summary>
+        /// <returns></returns>
+        private async Task InicializarConfiguracionAsync()
+        {
+            if (_configuracionIniciada) return;
+
+            await _semaforoInicializacion.WaitAsync();
+
+            try
+            {
+                if (_configuracionIniciada) return;
+                var usuario  = await _repositorioTomi.ObtenerConfiguracionGeneralHotScan(EnumComunes.CampoUsuarioConectorUt);
+                var contrasena  = await _repositorioTomi.ObtenerConfiguracionGeneralHotScan(EnumComunes.CampoContrasenaConectorUt);
+
+                _usuarioConectorUt = GeneraSha256Hex.Sha256Hex(usuario?.FirstOrDefault()?.Valor);
+                _ContrasenaConectorUt = GeneraSha256Hex.Sha256Hex(contrasena?.FirstOrDefault()?.Valor);
+
+                _configuracionIniciada = true;
+            }
+            finally
+            {
+                _semaforoInicializacion.Release();
+            }
+        }
+    }
+}
+
+******
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Modelos.Tomi;
+using MUFG_T24.Comunes;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Enums_utilidades;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Ejecuta analizis de operaciones
+    /// </summary>
+    public class LogicaOrquestador : IOrquestador
+    {
+        private readonly IRepositorioTomi _repositorioTomi;
+        private readonly Dictionary<Analizador, IAnalizador> _analizers;
+        private readonly ConfiguracionServicio _configuracion;
+
+        private readonly IControlServicio _controlServicio;
+
+        private int _activationTimeInMin;
+        private bool _automaticDesactivation;
+        private bool _automaticActivation;
+
+        private readonly SemaphoreSlim _semaforoInicializacion = new SemaphoreSlim(1, 1);
+        private bool _configuracionIniciada;
+
+        /// <summary>
+        /// Controlador.
+        /// </summary>
+        public LogicaOrquestador(IRepositorioTomi repositorioTomi, ConfiguracionServicio configuracion, IControlServicio controlServicio, LogicaUtc logicaUtc, LogicaFcm logicaFcm)
+        {
+            _configuracion = configuracion;
+            _repositorioTomi = repositorioTomi;
+            _analizers = new Dictionary<Analizador, IAnalizador>()
+            {
+                { Analizador.FCMConnector, logicaFcm },
+                { Analizador.UTConnector, logicaUtc }
+            };
+
+            _controlServicio = controlServicio;
+        }
+
+        /// <summary>
+        /// Actualiza estatus del plan maestro y agrega operacion a pila de tareas
+        /// </summary>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <returns>RespuestaOrquestador</returns>
+        public async Task<RespuestaOrquestador> EjecutaAnalizadoresAsync(
+            string strTipoOperacion, string strFolio, string strTablaBase)
+        {
+            RespuestaOrquestador resultado = new RespuestaOrquestador();
+            string strFechaEjecucion = string.Empty;
+            string strFechaTomi = _configuracion.FechaSistema;
+            bool boolExitoActualizacion;
+
+            try
+            {
+
+                await InicializarConfiguracionAsync();
+
+                //Obtener fecha de ejecucion para validaciones de fecha
+                Parametros objParametros = await _repositorioTomi.ObtenerFechaEjecucion(strFolio, strTipoOperacion);
+                if (objParametros?.NF_FECHA_EJECUCION == null)
+                    throw new Exception($"No se recuperó NF_FECHA_EJECUCION para folio '{strFolio}' y tipo operación '{strTipoOperacion}'.");
+
+                strFechaEjecucion = objParametros.NF_FECHA_EJECUCION.ToString();
+
+                Config.EscribirLog("INFO|ExecuteAnalizersAsync| lsFechaEjecucion: " + strFechaEjecucion, NombreServicio.HotScan.ToString());
+                Config.EscribirLog("INFO|ExecuteAnalizersAsync| _gsFechaSistema: " + strFechaTomi, NombreServicio.HotScan.ToString());
+
+
+                if (!int.TryParse(strFechaEjecucion, out int resultStrFechaEjecucion)) throw new FormatException($"Fecha de ejecución inválida: '{strFechaEjecucion}'.");
+                if (!int.TryParse(strFechaTomi, out int resultStrFechaTomi)) throw new FormatException($"Fecha sistema inválida: '{strFechaTomi}'.");
+
+
+                if (resultStrFechaEjecucion < resultStrFechaTomi)
+                {
+                    if (!long.TryParse(strFolio, out long folio)) throw new FormatException($"Folio inválido: '{strFolio}'.");
+
+                    await _controlServicio.MarcarErrorFechaPasada(folio);
+                    throw new Exception($"Se desea realizar una operación al {strFechaEjecucion} cuando la fecha del sistema es {strFechaTomi}.");
+                }
+
+                bool lbFechaFutura = resultStrFechaEjecucion > resultStrFechaTomi;
+
+                // Actualiza plan de trabajo
+                if (lbFechaFutura)
+                {
+                    Config.EscribirLog("AVISO|ExecuteAnalizersAsync|La operacion es fecha futura.", NombreServicio.HotScan.ToString());
+                    boolExitoActualizacion = await _repositorioTomi.ActualizaPlanTrabajoMaestro(new AplicacionHotScan.DTOs.PlanTrabajoMaestroDto
+                    {
+                        TipoActualizacion = 7,
+                        NuevoEstatus = string.Empty,
+                        Folio = strFolio,
+                        FolioMaestro = strFolio,
+                        TipoOperacion = strTipoOperacion,
+                        EstatusFiltro = EnumComunes.FECHA_FUTURA,
+                        NumeroEstatusEspcial = 0,
+                        DescripcionError = string.Empty,
+                        FechaValor = strFechaEjecucion,
+                        BanderaTerminado = false,
+                        BanderaCancelado = false
+                    });
+
+                    if (boolExitoActualizacion)
+                    {
+                        resultado.Success = false;
+                        return resultado;
+                    }
+                }
+                else
+                {
+                    await _repositorioTomi.ActualizaPlanTrabajoMaestro(new AplicacionHotScan.DTOs.PlanTrabajoMaestroDto
+                    {
+                        TipoActualizacion = 7,
+                        NuevoEstatus = string.Empty,
+                        Folio = strFolio,
+                        FolioMaestro = strFolio,
+                        TipoOperacion = strTipoOperacion,
+                        EstatusFiltro = EnumComunes.HOTSCAN,
+                        NumeroEstatusEspcial = 0,
+                        DescripcionError = string.Empty,
+                        FechaValor = strFechaEjecucion,
+                        BanderaTerminado = false,
+                        BanderaCancelado = false
+
+                    });
+                }
+
+                // Obtenemos las banderas de los screenings de FCM y Sentinel
+                ControlEscaneoHotScan controlEscaneoHs = (await _repositorioTomi
+                    .ObtenerControlEscaneoHotScan(strFolio, strTipoOperacion))
+                    .FirstOrDefault();
+
+                // Obtenemos la configuración de los analizadores
+                List<ConfiguracionAnalizadorConector> objConfigAnalizador = await _repositorioTomi.ObtenerConfiguracionAnalizadorHotScan();
+
+                if (objConfigAnalizador?.Count > 0)
+                {
+                    // Lista para tareas asincrónicas
+                    List<Task<bool>> tareas = new List<Task<bool>>();
+
+                    foreach (ConfiguracionAnalizadorConector configConector in objConfigAnalizador)
+                    {
+                        if (_analizers.ContainsKey((Analizador)configConector.Id))
+                        {
+                            // Verifica si la bandera correspondiente está activa
+                            bool isScreeningActive =
+                                (configConector.Id == (int)Analizador.FCMConnector && (!controlEscaneoHs?.Flg_FCM ?? true)) ||
+                                (configConector.Id == (int)Analizador.UTConnector && (!controlEscaneoHs?.Flg_Sentinel ?? true));
+
+                            // Si no está activo, salta este analizador
+                            if (!isScreeningActive) continue;
+
+                            // La validación del FCM no aplica para SWIFT
+                            if (configConector.Id == (int)Analizador.FCMConnector && strTipoOperacion.Contains(TipoOperacion.FXI)) continue;
+
+                            switch ((EstatusAnalizador)configConector.Estatus)
+                            {
+                                case EstatusAnalizador.Activo:
+                                    // Agrega la tarea a la lista
+                                    Config.EscribirLog("INFO|ExecuteAnalizersAsync| Analizador " + configConector.Descripcion + " activo. Se coloca en la pila de tareas", NombreServicio.HotScan.ToString());
+                                    tareas.Add(MetodoAnalizador(configConector.Id, strTipoOperacion, strFolio, strTablaBase));
+                                    break;
+
+                                case EstatusAnalizador.ApagadoAutomatico:
+                                    // Lógica de reactivación automática después de cierto tiempo
+                                    if (_automaticActivation && configConector.FechaModificacion.AddMinutes(_activationTimeInMin) < DateTime.Now)
+                                    {
+                                        await _repositorioTomi.ActivaAnalizadorHotScan(configConector.Id);
+                                        tareas.Add(MetodoAnalizador(configConector.Id, strTipoOperacion, strFolio, strTablaBase));
+                                    }
+                                    break;
+
+                                case EstatusAnalizador.Apagado:
+                                default:
+                                    Config.EscribirLog("INFO|ExecuteAnalizersAsync| Analizador " + configConector.Descripcion + " apagado", NombreServicio.HotScan.ToString());
+                                    break;
+                            }
+                        }
+                    }
+
+                    if (tareas.Count > 0)
+                    {
+                        Config.EscribirLog("INFO|ExecuteAnalizersAsync| tasks.Count > 0: " + tareas.Count.ToString(), NombreServicio.HotScan.ToString());
+                        // Ejecutar todas las tareas y esperar su finalización
+                        bool[] arrBoolTareas = await Task.WhenAll(tareas);
+                        Config.EscribirLog("INFO|ExecuteAnalizersAsync| taskResults.Length: " + arrBoolTareas.Length.ToString(), NombreServicio.HotScan.ToString());
+                        // Combina los resultados con un AND lógico
+                        resultado.Success = arrBoolTareas.All(r => r);
+                        Config.EscribirLog("INFO|ExecuteAnalizersAsync| taskResults.All(r => r): " + resultado.Success.ToString(), NombreServicio.HotScan.ToString());
+                    }
+                    else
+                    {
+                        Config.EscribirLog("INFO|ExecuteAnalizersAsync| tasks.Count <= 0", NombreServicio.HotScan.ToString());
+                        resultado.Success = true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Manejo de excepciones (log o rethrow, según aplique)
+                Config.EscribirLog($"ERROR|ExecuteAnalizersAsync| {ex.Message}", NombreServicio.HotScan.ToString());
+                resultado.Success = false;
+            }
+
+            // Log final de resultado
+            Config.EscribirLog("INFO|ExecuteAnalizersAsync| result.Success: " + resultado.Success.ToString(), NombreServicio.HotScan.ToString());
+            return resultado;
+        }
+
+        /// <summary>
+        /// Analiza operaciones y obtiene datos del proceso
+        /// </summary>
+        /// <param name="id"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <returns></returns>
+        private async Task<bool> MetodoAnalizador(int id, string strTipoOperacion, string strFolio, string strTablaBase)
+        {
+            bool result = false;
+            try
+            {
+                // Datos del Proceso
+                result = await _analizers[(Analizador)id].AnalisisOperacion(strTipoOperacion, strFolio, strTablaBase);
+                Config.EscribirLog("INFO|Analize| GetType: " + _analizers[(Analizador)id].GetType() + "| result: " + result.ToString(), NombreServicio.HotScan.ToString());
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|Analize| Exception: " + ex.Message, NombreServicio.HotScan.ToString());
+                if (_automaticDesactivation)
+                {
+                    await _repositorioTomi.DesactivaAnalizadorHotScan(id);
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Inicializa la configuracion del orquestador.
+        /// </summary>
+        /// <returns></returns>
+        private async Task InicializarConfiguracionAsync()
+        {
+
+            if (_configuracionIniciada) return;
+
+            await _semaforoInicializacion.WaitAsync();
+
+            try
+            {
+                if (_configuracionIniciada) return;
+
+                ConfiguracionGeneral objDesactivacionAutomatica = (await _repositorioTomi.ObtenerConfiguracionGeneralHotScan(ConstantesParametrosSistema.AnalizerAutomaticShutdown))?.FirstOrDefault();
+                ConfiguracionGeneral objReactivacionAutomatica = (await _repositorioTomi.ObtenerConfiguracionGeneralHotScan(ConstantesParametrosSistema.AnalizerAutomaticReactivation))?.FirstOrDefault();
+                ConfiguracionGeneral objTiempoReactivacion = (await _repositorioTomi.ObtenerConfiguracionGeneralHotScan(ConstantesParametrosSistema.AnalizerAutomaticReactivationTimeSec))?.FirstOrDefault();
+
+                int.TryParse(objTiempoReactivacion?.Valor, out _activationTimeInMin);
+
+                _automaticDesactivation = int.TryParse(objDesactivacionAutomatica?.Valor, out int resultAutomaticDesactivation) && resultAutomaticDesactivation == 1;
+                _automaticActivation = int.TryParse(objReactivacionAutomatica?.Valor, out int resultAutomaticActive) && resultAutomaticActive == 1;
+
+
+                _configuracionIniciada = true;
+            }
+            finally
+            {
+                _semaforoInicializacion.Release();
+            }
+        }
+    }
+}
+
+********************
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Modelos.Tomi;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Obtiene cargo y tipo de operacion, motivo de devolucion para procesar analizis de operacion
+    /// </summary>
+    public class LogicaUtc : IAnalizador
+    {
+        private readonly IRepositorioTomi _repositorioTomi;
+        private readonly IClienteConectorUt _clienteConector;
+        private readonly ConfiguracionServicio _configuracion;
+
+        /// <summary>
+        /// Controlador.
+        /// </summary>
+        /// <param name="repositorioTomi"></param>
+        /// <param name="clienteConector"></param>
+        /// <param name="configuracion"></param>
+        public LogicaUtc(IRepositorioTomi repositorioTomi, IClienteConectorUt clienteConector, ConfiguracionServicio configuracion)
+        {
+            _repositorioTomi = repositorioTomi;
+            _clienteConector = clienteConector;
+            _configuracion = configuracion;
+        }
+
+        /// <summary>
+        /// Analiza la operacion e inserta folio en tabla de intercambio
+        /// </summary>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <returns>true/false</returns>
+        public async Task<bool> AnalisisOperacion(string strTipoOperacion, string strFolio, string strTablaBase)
+        {
+            bool boolResultado = false;
+            try
+            {
+                bool boolBanderaEncontrado = false;
+
+                // Obtiene tipo operacion
+                string _strTipoOperacion = await ObtenerTipoTransaccionAsync(strFolio, strTipoOperacion);
+
+
+                // Asigna campo y SP a tipo de operacion
+                Dictionary<string, (string procedimientoAlmacenado, string campo, int tipoConsulta)> configuraCampoSpTipoOperacion =
+                    new Dictionary<string, (string procedimientoAlmacenado, string campo, int tipoConsulta)>
+            {
+                // Grupo 1
+                { TipoOperacion.SPID_Local, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.SPID_GPH, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.SPID_H2H, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.PaP_SPID, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.SPID, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.TEF, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.PaP_TEF, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.TEF_GPH, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.TEF_H2H, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.FXD, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.FXD_GPH, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.FXD_H2H, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.PaP_FXD, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.NOM_FXD, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.FXD_Local, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.FXI_Local, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 1) },
+
+                // Grupo 2
+                { TipoOperacion.FXI_GPH, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 2) },
+                { TipoOperacion.FXI_H2H, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 2) },
+                { TipoOperacion.FXI, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 2) },
+                { TipoOperacion.PaP_FXI, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 2) },
+
+                // Grupo 3
+                { TipoOperacion.SER, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 3) },
+                { TipoOperacion.TAX, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 3) },
+                
+                // Grupo 4
+                { TipoOperacion.ENT_SPID, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 4) },
+
+                // Grupo 5
+                { TipoOperacion.ENT_TEF, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoFolio, 5) },
+
+                // Grupo 6
+                { TipoOperacion.ENT_SPEI, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoClaveOperacion, 6) },
+                { TipoOperacion.ENT_SPEI_2, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacionUTC, EnumComunes.CampoClaveOperacion, 6) },
+            };
+
+                Config.EscribirLog("INFO|Analisis_Sentinel|Inicia la inspección del tipo de operación " + strTipoOperacion + " con folio: " + strFolio, NombreServicio.HotScan.ToString());
+
+                string strSp = string.Empty;
+                string strCampo = string.Empty;
+                int intTipoConsulta = 0;
+                // Obtiene tabla y campo de la entidad/operacion
+                if (configuraCampoSpTipoOperacion.TryGetValue(strTipoOperacion, out var resultado))
+                {
+                    strSp = resultado.procedimientoAlmacenado;
+                    strCampo = resultado.campo;
+                    intTipoConsulta = resultado.tipoConsulta;
+                }
+
+                if (string.IsNullOrWhiteSpace(strSp) || string.IsNullOrWhiteSpace(strCampo) || intTipoConsulta == 0)
+                    throw new ArgumentException("Error: Procedimiento almacenado/campo no encontrado");
+
+                TablaBaseOperacionGrupo datosBase = await _repositorioTomi.EjecutaProcedimientoDinamico(strFolio, strTablaBase, strCampo, intTipoConsulta, strSp);
+                int intMotivoDevolucion = 0;
+                string strEstatus = string.Empty;
+                SolicitudConectorUt solicitudConector = null;
+
+                if (datosBase != null)
+                {
+                    boolBanderaEncontrado = true;
+                    solicitudConector = new SolicitudConectorUt();
+
+                    if (strTipoOperacion == TipoOperacion.ENT_TEF || strTipoOperacion == TipoOperacion.ENT_SPEI
+                        || strTipoOperacion == TipoOperacion.ENT_SPEI_2 || strTipoOperacion == TipoOperacion.ENT_SPID)
+                    {
+                        int.TryParse(datosBase.MotivoDevolucion.ToString(), out intMotivoDevolucion);
+                    }
+
+                    if (int.TryParse(strFolio, out int rFolio))
+                        solicitudConector.Folio = rFolio;
+
+                    solicitudConector.TipoOp = strTipoOperacion;
+                    solicitudConector.CDL = BaseDatosHelper.ObtieneTexto(datosBase.T24_CUSTOMER_CODE, 20);
+                    solicitudConector.CustomerName = BaseDatosHelper.ObtieneTexto(datosBase.T24_SHORT_NAME, 120);
+                    solicitudConector.TransactionCode = _strTipoOperacion;
+                    solicitudConector.DateofTransaction = BaseDatosHelper.ObtieneTexto(datosBase.NF_FECHA_EJECUCION.ToString(), 10);
+                    solicitudConector.TimeofTransaction = BaseDatosHelper.ObtieneTexto(datosBase.TIMEOFTRANSACTION, 8);
+                    solicitudConector.Channel = ObtenerCanal(strTablaBase);
+                    solicitudConector.Currency = BaseDatosHelper.ObtieneTexto(datosBase.T24_DEBIT_CURRENCY, 5);
+                    if (decimal.TryParse(BaseDatosHelper.ObtieneTexto(datosBase.T24_DEBIT_AMOUNT.ToString()), out decimal rAmount))
+                        solicitudConector.Amount = rAmount;
+                    solicitudConector.OrderingBank = BaseDatosHelper.ObtieneTexto(datosBase.T24_ORDERING_BANK, 40);
+                    if (strTipoOperacion.Contains(EnumComunes.TipoOpEnt))
+                    {
+                        if (intMotivoDevolucion > 0)
+                        {
+                            solicitudConector.OrderingAccount = BaseDatosHelper.ObtieneTexto(datosBase.T24_BEN_ACCT_NO, 40);
+                            solicitudConector.BeneficiaryAccount = BaseDatosHelper.ObtieneTexto(datosBase.T24_DEBIT_ACCT_NO);
+                        }
+                        else
+                        {
+                            solicitudConector.OrderingAccount = BaseDatosHelper.ObtieneTexto(datosBase.T24_DEBIT_ACCT_NO, 40);
+                            solicitudConector.BeneficiaryAccount = BaseDatosHelper.ObtieneTexto(datosBase.T24_BEN_ACCT_NO);
+                        }
+                    }
+                    else
+                    {
+                        solicitudConector.OrderingAccount = BaseDatosHelper.ObtieneTexto(datosBase.T24_DEBIT_ACCT_NO, 40);
+                        solicitudConector.BeneficiaryAccount = BaseDatosHelper.ObtieneTexto(datosBase.T24_BEN_ACCT_NO);
+                    }
+                    solicitudConector.OrderingParty = BaseDatosHelper.ObtieneTexto(datosBase.T24_SHORT_NAME, 40);
+                    solicitudConector.BeneficiaryBank = BaseDatosHelper.ObtieneTexto(datosBase.NF_BANCO_BENEF, 50);
+                    solicitudConector.BeneficiaryParty = BaseDatosHelper.ObtieneTexto(datosBase.T24_BEN_CUST_NAME);
+
+                    strEstatus = BaseDatosHelper.ObtieneTexto(datosBase.NF_ESTATUS);
+                }
+
+                if (!boolBanderaEncontrado)
+                {
+                    Config.EscribirLog("AVISO|AnalisisAsync|No hay datos a verificar, posiblemente el estatus de la tabla de trabajo no tenga el folio o el estatus es diferente al esperado.", NombreServicio.HotScan.ToString());
+                    return false;
+                }
+
+                // Actualiza folio con nuevo estatus
+                string strNuevoEstatus = string.Empty;
+                if (strTipoOperacion.StartsWith(EnumComunes.TipoOpEnt) && intMotivoDevolucion > 0)
+                {
+                    strNuevoEstatus = EnumComunes.TipoOpCon + strEstatus.Substring(3, 1);
+                    Config.EscribirLog("INFO|AnalisisAsync| Transaccion SIN alerta.", NombreServicio.HotScan.ToString());
+
+                    bool boolResultadoEstatus = await _repositorioTomi.ActualizaNuevoEstatus(strFolio, strTablaBase, strNuevoEstatus, strCampo);
+                    Config.EscribirLog("INFO|AnalisisAsync|-> Termino de escaneo del folio " + strFolio + ".", NombreServicio.HotScan.ToString());
+                    return boolResultadoEstatus;
+                }
+
+                RespuestaConectorUt objRespuestaConectorUt = await _clienteConector.EnviarConectorUt(solicitudConector);
+                Config.EscribirLog("INFO|AnalisisAsync|utResponse.Description: " + objRespuestaConectorUt?.Description, NombreServicio.HotScan.ToString());
+                boolResultado = objRespuestaConectorUt?.Description == EnumComunes.RespuestaConector;
+                if (!boolResultado)
+                    throw new Exception("Error respueta conector no exitosa");
+                await _repositorioTomi.ValidaControlEscaneoHotScan(strFolio, strTipoOperacion, EnumComunes.BanderaAnalizador);
+
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|Analisis_SentinelUT|Error en la ejecución del folio " + strFolio + ", excepción: " + ex.ToString(), NombreServicio.HotScan.ToString());
+
+                await _repositorioTomi.InsertaAlerta(new MUFG_T24.Modelos.AlertaDTO
+                {
+                    Folio = strFolio,
+                    TipoOPeracion = strTipoOperacion,
+                    Servicio = NombreServicio.HotScan.ToString(),
+                    ClaveAviso = EnumComunes.CLAVE_AVISO_CRITICO,
+                    Descipcion = ex.Message,
+                    PId = (int)_configuracion.Pid,
+                    NombreProceso = _configuracion.NombreProceso,
+                    Exception = ex
+                });
+            }
+            return boolResultado;
+        }
+
+
+        /// <summary>
+        /// Obtiene tipo de transaccion del folio
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>string</returns>
+        /// <exception cref="Exception"></exception>
+        private async Task<string> ObtenerTipoTransaccionAsync(string strFolio, string strTipoOperacion)
+        {
+            Config.EscribirLog("INFO|GetTransactionType|Inicia proceso para obtención del transaction type " + strFolio + " " + strTipoOperacion, NombreServicio.HotScan.ToString());
+
+            if (string.IsNullOrEmpty(strTipoOperacion) || string.IsNullOrEmpty(strFolio))
+                throw new Exception("El folio/tipo operacion no puede ser vacio.");
+
+            List<string> _ltsOperaciones = new List<string>
+            {
+                TipoOperacion.FXD_Local,
+                TipoOperacion.FXI,
+                TipoOperacion.ENT_TEF,
+            };
+
+            string _strSubOperacion = string.Empty;
+
+            // Valida que la operacion exista para procesar
+            if (!_ltsOperaciones.Contains(strTipoOperacion))
+            {
+                switch (strTipoOperacion)
+                {
+                    case TipoOperacion.SPID_Local:
+                        _strSubOperacion = EnumSubOperacion.Sin_Com;
+                        break;
+                    case TipoOperacion.NOM_FXD:
+                        _strSubOperacion = EnumSubOperacion.Nom_FXD;
+                        break;
+                    default:
+                        _strSubOperacion = EnumSubOperacion.Com_Envio;
+                        break;
+                }
+            }
+            else
+            {
+                switch (strTipoOperacion)
+                {
+                    case TipoOperacion.FXD_Local:
+                        _strSubOperacion = await OperacionFxdLocal(strFolio);
+                        break;
+                    case TipoOperacion.FXI:
+                        _strSubOperacion = await OperacionFxi(strFolio);
+                        break;
+                    case TipoOperacion.ENT_TEF:
+                        _strSubOperacion = await OperacionEntTef(strFolio);
+                        break;
+                }
+            }
+
+            Config.EscribirLog("INFO|GetTransactionType|Consulta con trx_operacion ='" + strTipoOperacion + "' y  trx_sub_operacion ='" + _strSubOperacion + "'", NombreServicio.HotScan.ToString());
+
+            Parametros strTipoOperacionTrx = await _repositorioTomi.ObtieneTipoTransaccionTrx(strTipoOperacion, _strSubOperacion);
+
+            Config.EscribirLog("INFO|GetTransactionType|Regresa Transaction Type " + strTipoOperacionTrx, NombreServicio.HotScan.ToString());
+            return strTipoOperacionTrx?.T24_trx_type;
+
+        }
+
+        /// <summary>
+        /// Valida si existe motivo de devolicion
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns>string</returns>
+        private async Task<string> OperacionEntTef(string strFolio)
+        {
+            // Busca cargo en tomi
+            Parametros objParametros = await _repositorioTomi.ObtieneMotivoDevolucionEntTef(strFolio);
+            int intMotivoDevolucion = objParametros.MotivoDevolucion;
+            Config.EscribirLog("INFO|GetTransactionType|FXI se obtiene el nf_charge = " + intMotivoDevolucion, NombreServicio.HotScan.ToString());
+
+            if (intMotivoDevolucion == 0)
+            {
+                Config.EscribirLog("INFO|GetTransactionType|ENT_TEF No se detectó motivo de devolución", NombreServicio.HotScan.ToString());
+                return EnumSubOperacion.Com_Envio;
+            }
+            else
+            {
+                Config.EscribirLog("INFO|GetTransactionType|ENT_TEF Se detectó motivo de devolución " + intMotivoDevolucion, NombreServicio.HotScan.ToString());
+                return EnumSubOperacion.Devolucion;
+            }
+        }
+
+        /// <summary>
+        /// Busca cargo FXI en InterfacesT24
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns></returns>
+        private async Task<string> OperacionFxi(string strFolio)
+        {
+            // Busca cargo en tomi
+            Parametros objParametros = await _repositorioTomi.ObtieneCargoFxi(strFolio);
+            string strCargo = objParametros.NF_CHARGE;
+
+            Config.EscribirLog("INFO|GetTransactionType|FXI se obtiene el nf_charge = " + strCargo, NombreServicio.HotScan.ToString());
+
+            return strCargo == EnumComunes.TipoCargoBeneficiario
+                ? EnumSubOperacion.Sin_Com
+                : EnumSubOperacion.Com_Envio;
+        }
+
+        /// <summary>
+        /// Proceso operacion FXD_Local
+        /// Valida si es banco y si existe el folio
+        /// Obtiene codigo de cliente para buscarlo en VistasT24
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns>string</returns>
+        private async Task<string> OperacionFxdLocal(string strFolio)
+        {
+            Parametros objParametros = await _repositorioTomi.ValidacionExisteFolio(strFolio);
+            int intExisteFolio = objParametros.RegSwift;
+
+            Config.EscribirLog("INFO|GetTransactionType|Se consultó la tabla SWIFT para saber si el FXD proviene de uno. Resultado " + intExisteFolio, NombreServicio.HotScan.ToString());
+
+            // Consulta codigo cliente
+            ClienteFxdLocal objClienteFxd = await _repositorioTomi.ConsultaCodigoClienteFxdLocal(strFolio);
+            string strCodigoCliente = BaseDatosHelper.ObtieneTexto(objClienteFxd.T24_CUSTOMER_CODE);
+            string strCargoFxd = BaseDatosHelper.ObtieneTexto(objClienteFxd.NF_CHARGE);
+
+            Config.EscribirLog("INFO|GetTransactionType|Datos de customerCode "
+                + strCodigoCliente + " y charge " + strCargoFxd, NombreServicio.HotScan.ToString());
+
+            // Valida es banco de VistasT24
+            Parametros objParametrosEsBanco = await _repositorioTomi.ValidaEsbancoVistaT24(strCodigoCliente);
+            int intEsBanco = objParametrosEsBanco.EsBanco;
+            Config.EscribirLog("INFO|GetTransactionType|Resultado para saber si es banco "
+                + intEsBanco, NombreServicio.HotScan.ToString());
+
+            // Valida si es banco
+            bool boolTieneFolioEsbanco = intExisteFolio > 0 || intEsBanco > 0;
+            if (boolTieneFolioEsbanco)
+            {
+                return (strCargoFxd == EnumComunes.TipoCargoNuestro
+                ? EnumSubOperacion.Sin_Com_O
+                : EnumSubOperacion.Sin_Com_S);
+            }
+            else
+            {
+                return EnumSubOperacion.Com_Envio;
+            }
+        }
+
+        /// <summary>
+        /// Clasifica operaciones segun su origen/canal
+        /// </summary>
+        /// <param name="strTabla"></param>
+        /// <returns>string</returns>
+        private string ObtenerCanal(string strTabla)
+        {
+            if (string.IsNullOrWhiteSpace(strTabla))
+                return string.Empty;
+
+            // Divide texto
+            string[] arrResultado = strTabla.Split('_');
+
+            if (arrResultado.Length > 0)
+            {
+                // obtiene ultimo valor
+                string strCanal = arrResultado[arrResultado.Length - 1]?.ToUpper();
+                if (strCanal == EnumComunes.CanalGPH || strCanal == EnumComunes.CanalH2H)
+                    return strCanal;
+
+                if (strCanal == EnumComunes.CanalLocal)
+                    return EnumComunes.CanalTomi;
+            }
+            return string.Empty;
+        }
+    }
+}
+
+***********************
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Modelos.Tomi;
+using Aplicacion.Utileria;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+using System.Xml;
+
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Genera XML para FC y analiza operaciones para actualziar estatus
+    /// </summary>
+    public class LogicaFcm : IAnalizador
+    {
+        private readonly IRepositorioTomi _repositorioTomi;
+        private readonly ConfiguracionServicio _configuracion;
+
+        /// <summary>
+        /// Controlador.
+        /// </summary>
+        public LogicaFcm(IRepositorioTomi repositorioTomi, ConfiguracionServicio configuracion)
+        {
+            _repositorioTomi = repositorioTomi;
+            _configuracion = configuracion;
+        }
+
+        /// <summary>
+        /// Analiza la operacion e inserta folio en tabla de intercambio
+        /// </summary>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <returns>true/false</returns>
+        public async Task<bool> AnalisisOperacion(string strTipoOperacion, string strFolio, string strTablaBase)
+        {
+            try
+            {
+                bool boolBanderaEncontrado = false;
+                // Asigna campo y SP a tipo de operacion
+                Dictionary<string, (string procedimientoAlmacenado, string campo, int grupo)> configuraCampoSpTipoOperacion = 
+                    new Dictionary<string, (string procedimientoAlmacenado, string campo, int grupo)>
+            {
+                // Grupo 1
+                { TipoOperacion.SPID_Local, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio,1) },
+                { TipoOperacion.SPID_GPH, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.SPID_H2H, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.PaP_SPID, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.SPID, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.SPID2, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.TEF, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.PaP_TEF, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.TEF_GPH, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.TEF_H2H, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.FXD, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.FXD_GPH, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.FXD_H2H, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.PaP_FXD, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.NOM_FXD, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+                { TipoOperacion.FXD_Local, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 1) },
+
+                // Grupo 2
+                { TipoOperacion.SER, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 2) },
+                { TipoOperacion.TAX, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 2) },
+                
+                // Grupo 3
+                { TipoOperacion.ENT_SPID, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 3) },
+
+                // Grupo 4
+                { TipoOperacion.ENT_TEF, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoFolio, 4) },
+
+                // Grupo 5
+                { TipoOperacion.ENT_SPEI, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoClaveOperacion, 5) },
+                { TipoOperacion.ENT_SPEI_2, (EnumNombresProcedimientosAlmacenados.usp_ConsultaInspeccionTipoOperacion, EnumComunes.CampoClaveOperacion, 5) },
+            };
+
+                Config.EscribirLog("INFO|Analisis_FCM|Inicia la inspección del tipo de operación " + strTipoOperacion + " con folio: " + strFolio, NombreServicio.HotScan.ToString());
+
+                string strSp = string.Empty;
+                string strCampo = string.Empty;
+                int intTipoConsulta = 0;
+                if (configuraCampoSpTipoOperacion.TryGetValue(strTipoOperacion, out var resultado))
+                {
+                    strSp = resultado.procedimientoAlmacenado;
+                    strCampo = resultado.campo;
+                    intTipoConsulta = resultado.grupo;
+                }
+
+                if (string.IsNullOrWhiteSpace(strSp) || string.IsNullOrWhiteSpace(strCampo) || intTipoConsulta == 0)
+                    throw new ArgumentException("Error: Procedimiento almacenado/campo no encontrado");
+
+                TablaBaseOperacionGrupo datosBase = await _repositorioTomi.EjecutaProcedimientoDinamico(strFolio, strTablaBase, strCampo, intTipoConsulta, strSp);
+                int intMotivoDevolucion = 0;
+                string strEstatus = string.Empty;
+                string strFolioUnico = string.Empty;
+                string strFechaEjecucion = string.Empty;
+
+                Dictionary<string, object> diccValores = null;
+
+                if (datosBase != null)
+                {
+                    boolBanderaEncontrado = true;
+
+                    // Agrega coleccion
+                    diccValores = new Dictionary<string, object>()
+                    {
+                        {"AMOUNT", datosBase.T24_DEBIT_AMOUNT},
+                        {"APPLICATION_ID", strTipoOperacion },
+                        {"CURRENCY", datosBase.T24_DEBIT_CURRENCY},
+                        {"ID", datosBase.NF_FOLIO},
+                        {"TRANSACTION_NUMBER", datosBase.NF_FOLIO_UNICO},
+                        {"RECEIVER", Comunes.TextoBESS((datosBase.T24_BEN_CUST_NAME ?? string.Empty).Replace("&", "")) },
+                        {"SENDER", Comunes.TextoBESS((datosBase.T24_COMPANY_NAME ?? string.Empty).Replace("&", "")) },
+                        {"VALUE_DATE", datosBase.NF_FECHA_EJECUCION},
+                        {"CONCEPT", Comunes.TextoBESS((datosBase.T24_DEBIT_THEIR_REF ?? string.Empty).Replace("&", "")) },
+                        {"ESTATUS", BaseDatosHelper.ObtieneTexto(datosBase.NF_ESTATUS) }
+                    };
+
+                    strEstatus = BaseDatosHelper.ObtieneTexto(datosBase.NF_ESTATUS);
+                    strFechaEjecucion = BaseDatosHelper.ObtieneTexto(datosBase.NF_FECHA_EJECUCION.ToString()).AFormatoFecha();
+                    strFolioUnico = BaseDatosHelper.ObtieneTexto(datosBase.NF_FOLIO_UNICO);
+
+                    if (strTipoOperacion == TipoOperacion.ENT_TEF || strTipoOperacion == TipoOperacion.ENT_SPEI
+                        || strTipoOperacion == TipoOperacion.ENT_SPEI_2 || strTipoOperacion == TipoOperacion.ENT_SPID)
+                    {
+                        int.TryParse(datosBase.MotivoDevolucion.ToString(), out intMotivoDevolucion);
+                    }
+                }
+
+                // Actualiza a cancelado
+                if (strEstatus == Estatus.RECC.ToString())
+                {
+                    Config.EscribirLog("INFO|" + strTipoOperacion + ".procesaOperacion|Se ha detectado la cancelación de una operación. ", NombreServicio.HotScan.ToString());
+                    return await _repositorioTomi.ActualizaCancelacionOperacionFcm(strFolio, BaseDatosHelper.ObtieneTexto(strFolioUnico));
+                }
+
+                if (!boolBanderaEncontrado)
+                {
+                    Config.EscribirLog("AVISO|Analisis_FCM|No hay datos a verificar, posiblemente el estatus de la tabla de trabajo no tenga el folio o el estatus es diferente al esperado."
+                        , NombreServicio.HotScan.ToString());
+                    return false;
+                }
+
+                // Actualiza con nuevo estatus
+                string strNuevoEstatus = string.Empty;
+                if (strTipoOperacion.StartsWith(EnumComunes.TipoOpEnt) && intMotivoDevolucion > 0)
+                {
+                    strNuevoEstatus = EnumComunes.TipoOpCon + strEstatus.Substring(3, 1);
+                    Config.EscribirLog("INFO|AnalisisAsync| Transaccion SIN alerta.", NombreServicio.HotScan.ToString());
+
+                    bool boolResultadoEstatus = await _repositorioTomi.ActualizaNuevoEstatus(strFolio, strTablaBase, strNuevoEstatus, strCampo);
+                    Config.EscribirLog("INFO|AnalisisAsync|-> Termino de escaneo del folio " + strFolio + ".", NombreServicio.HotScan.ToString());
+                    return boolResultadoEstatus;
+                }
+
+                // Genera XML
+                string strSolicitudXml = GeneraXmlFcm(diccValores, strTipoOperacion);
+                Config.EscribirLog("INFO|Analisis_FCM|-> Genera XML Final para tipo='" + strTipoOperacion + "', base='" + strTablaBase + "', folio:" + strFolio + ".", NombreServicio.HotScan.ToString());
+               
+                if (_configuracion.FcmActivoBtmum)
+                {
+                    Config.EscribirLog("INFO|Analisis_FCM|-> Inicio Insert a TBL_FCM_INTERCAMBIO, tipo='" + strTipoOperacion + "', base='" +
+                        strTablaBase + "', folio:" + strFolio + ".", NombreServicio.HotScan.ToString());
+
+                    try
+                    {
+                        // Inserta xml y folio en tabla de intercambio
+                        StoredProcedureResult objResultadoSp = await _repositorioTomi.InsertaFolioTablaIntercambio(strFolio, strTipoOperacion, strSolicitudXml);
+                        Config.EscribirLog("INFO|Analisis_FCM| Pasaron los parametros correctamente e inicia StoreProcedure 'usp_TOMBIN_INSERT_FORMATO_FCM'.", NombreServicio.HotScan.ToString());
+
+                        if (!objResultadoSp.Exito)
+                            throw new Exception("Error al ejecutar insercion en SP.");
+
+                        Config.EscribirLog("INFO|Analisis_HotScan| StoreProcedure ejecutado correctamente HotScan_BTMUM.", NombreServicio.HotScan.ToString());
+                        Config.EscribirLog("INFO|inserta_intercambio| ID_ENVIO =" + objResultadoSp.UltimoIdRecuperado + ".", NombreServicio.HotScan.ToString());
+                    }
+                    catch (Exception ex)
+                    {
+                        Config.EscribirLog("AVISO|inserta_intercambio| Error en la ejecucion del stored procedure BTMUM:" + Environment.NewLine + ex.ToString(), NombreServicio.HotScan.ToString());
+                    }
+
+                    // Actualiza folio con nuevo estatus
+                    strNuevoEstatus = "HOT" + strEstatus.Substring(3, 1);
+                    await _repositorioTomi.ActualizaNuevoEstatus(strFolio, strTablaBase, strNuevoEstatus, strCampo);
+                    Config.EscribirLog("INFO|Analisis_FCM|-> Termino de escaneo del folio " + strFolio + ".", NombreServicio.HotScan.ToString());
+                }
+                else
+                {
+                    Config.EscribirLog("INFO|Analisis_FCM|-> Desactivado inserción de transaccion FCM por especificacion del usuario (FCM_activo=0).", NombreServicio.HotScan.ToString());
+                    strNuevoEstatus = "CON" + strEstatus.Substring(3, 1);
+                    await _repositorioTomi.ActualizaNuevoEstatus(strFolio, strTablaBase, strNuevoEstatus, strCampo);
+                    Config.EscribirLog("INFO|Analisis_FCM|-> Se continua el proceso sin el escaneo del folio  " + strFolio + ".", NombreServicio.HotScan.ToString());
+                }
+
+                await _repositorioTomi.ValidaControlEscaneoHotScan(strFolio, strTipoOperacion, EnumComunes.BanderaAnalizadorF);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|Analisis_SentinelFCM|Error en la ejecución del folio " + strFolio + ", excepción: " + ex.ToString(), NombreServicio.HotScan.ToString());
+
+                // Datos del Proceso
+                await _repositorioTomi.InsertaAlerta(new MUFG_T24.Modelos.AlertaDTO
+                {
+                    Folio = strFolio,
+                    TipoOPeracion = strTipoOperacion,
+                    Servicio = NombreServicio.HotScan.ToString(),
+                    ClaveAviso = EnumComunes.CLAVE_AVISO_CRITICO,
+                    Descipcion = ex.Message,
+                    PId = (int)_configuracion.Pid,
+                    NombreProceso = _configuracion.NombreProceso,
+                    Exception = ex
+                });
+            }
+            return false;
+        }
+        
+        /// <summary>
+        /// Genera un XML de solicitud de escaneo para FCM (Formato de Comunicaciones Monetarias)
+        /// </summary>
+        /// <param name="diccValores"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        private string GeneraXmlFcm(Dictionary<string, object> diccValores, string strTipoOperacion)
+        {
+            // Almacena en memoria el xml
+            using (MemoryStream flujoMemoria = new MemoryStream())
+            {
+                XmlWriterSettings configuracion = new XmlWriterSettings()
+                {
+                    Encoding = Encoding.UTF8,
+                    Indent = true,
+                };
+
+                // Se crea el escritor xml
+                using (XmlWriter escritor = XmlWriter.Create(flujoMemoria, configuracion))
+                {
+                    // Obtiene el tipo de mensaje y el subtipo de mensaje según el tipo de operación
+                    string strTipoMensaje = ObtenerTipoMensaje(strTipoOperacion);
+                    string strSubTipoMensaje = ObtenerSubTipoMensaje(strTipoOperacion);
+
+
+                    // Funcion auxiliar para obtener los valores del diccionario de forma segura
+                    Func<string, string> funcObtenerValor = clave =>
+                        diccValores.ContainsKey(clave) && diccValores[clave] != null
+                        ? diccValores[clave].ToString()
+                        : string.Empty;
+
+                    // Inicio del documento xml
+                    escritor.WriteStartDocument();
+
+                    // Escribe el encabezado del XML
+                    escritor.WriteStartElement(EnumConstantesXml.ElementoRaiz);
+                    escritor.WriteAttributeString(EnumConstantesXml.NombreAtributoVersion, EnumConstantesXml.ValorAtributoVersion);
+
+                    // Escribe los elementos del XML con los valores proporcionados
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoMonto, funcObtenerValor(EnumConstantesXml.ClaveMonto).ToString());
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoIdAplicacion, ObtenerAplicacionId(funcObtenerValor(EnumConstantesXml.ClaveIdAplicacion).ToString()));
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoCodigoArea, EnumConstantesXml.ValorCodigoArea);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoIdBroker, string.Empty);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoCentroCosto, string.Empty);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoDireccion,
+                        strTipoOperacion.StartsWith(EnumConstantesXml.PrefijoEntrada)
+                            ? EnumConstantesXml.ValorDireccionEntrada
+                            : EnumConstantesXml.ValorDireccionSalida);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoMoneda, funcObtenerValor(EnumConstantesXml.ClaveMoneda).ToString());
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoGateway, ObtenerSubTipo(strTipoOperacion));
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoId, funcObtenerValor(EnumConstantesXml.ClaveId).ToString());
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoMandante, EnumConstantesXml.ValorMandante);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoFormatoMensaje, EnumConstantesXml.ValorFormatoMensaje);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoSubtipoMensaje, strSubTipoMensaje);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoTipoMensaje, strTipoMensaje);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoPrioridad, EnumConstantesXml.ValorPrioridadUrgente);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoFechaSolicitud, DateTime.Now.ToString(EnumConstantesXml.FormatoFechaRoundTrip));
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoTipoRiesgo, EnumConstantesXml.ValorTipoRiesgo);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoNumeroTransaccion, funcObtenerValor(EnumConstantesXml.ClaveNumeroTransaccion).ToString());
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoReceptor, EnumConstantesXml.ValorVacio);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoEmisor, EnumConstantesXml.ValorVacio);
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoFechaValor, funcObtenerValor(EnumConstantesXml.ClaveFechaValor).ToString());
+
+                    escritor.WriteElementString(
+                        EnumConstantesXml.ElementoIdZona, EnumConstantesXml.ValorIdZona);
+
+                    // Construccion del contenido del payload (XML escapado)
+                    string contenidoXml =
+                         "<XML>" +
+                             "<" + strTipoMensaje + ">" +
+                                 "<folio>" + funcObtenerValor("ID") + "</folio>" +
+                                 "<tipo_operacion>" + strTipoOperacion + "</tipo_operacion>" +
+                                 "<folio_unico>" + funcObtenerValor("TRANSACTION_NUMBER") + "</folio_unico>" +
+                                 "<ordenante>" + funcObtenerValor("SENDER") + "</ordenante>" +
+                                 "<beneficiario>" + funcObtenerValor("RECEIVER") + "</beneficiario>" +
+                                 "<concepto>" + funcObtenerValor("CONCEPT") + "</concepto>" +
+                                 "</" + strTipoMensaje + ">" +
+                         "</XML>";
+
+                    XmlDocument doc;
+                    string error;
+
+                    if (!XmlHelper.TryParseXmlSeguro(contenidoXml, out doc, out error))
+                    {
+                        Config.EscribirLog("ERROR|XML|XML inválido: " + error);
+                        throw new Exception("ERROR|XML|XML inválido: " + error);
+                    }
+
+                    // Nodo con CDATA
+                    escritor.WriteStartElement(EnumConstantesXml.ElementoPayload);
+                    escritor.WriteCData(contenidoXml);
+                    escritor.WriteEndElement(); //playload
+
+                    // Cierra el elemento raíz del XML y vacía el contenido del writer
+                    escritor.WriteEndElement(); //scan_request
+                    escritor.WriteEndDocument();
+                    escritor.Flush();
+                }
+                // Convierte el MemoryStream a una cadena de texto
+                flujoMemoria.Position = 0;
+                using (StreamReader reader = new StreamReader(flujoMemoria, Encoding.UTF8))
+                {
+                    return reader.ReadToEnd();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Determina el tipo de gateway asociado a un tipo de operación específico.
+        /// </summary>
+        /// <param name="strTipoOperacion">El tipo de operación para el cual se debe determinar el gateway.</param>
+        /// <returns>El tipo de gateway como una cadena de texto.</returns>
+        public string ObtenerSubTipo(string strTipoOperacion)
+        {
+            if (string.IsNullOrWhiteSpace(strTipoOperacion))
+                throw new Exception("Error: tipo de operacion no puede ser null");
+
+            Dictionary<string, string> mapeadorOperacion = new Dictionary<string, string>()
+            {
+                // Si la operación es una entrada de SPID, TEF, SPEI o SPEI_2, el gateway es "ENT"
+                { TipoOperacion.ENT_SPID, EnumComunes.SubTipoOperacionENT },
+                { TipoOperacion.ENT_TEF, EnumComunes.SubTipoOperacionENT },
+                { TipoOperacion.ENT_SPEI, EnumComunes.SubTipoOperacionENT },
+                { TipoOperacion.ENT_SPEI_2, EnumComunes.SubTipoOperacionENT },
+
+                // Si la operación es una de CMS (FXD, SPID, TEF, PaP_TEF, PaP_SPID, PaP_FXD, NOM_FXD, SER, TAX), el gateway es "CMS"
+                { TipoOperacion.FXD, TipoOperacion.CMS },
+                { TipoOperacion.SPID, TipoOperacion.CMS },
+                { TipoOperacion.TEF, TipoOperacion.CMS },
+                { TipoOperacion.PaP_TEF, TipoOperacion.CMS },
+                { TipoOperacion.PaP_SPID, TipoOperacion.CMS },
+                { TipoOperacion.PaP_FXD, TipoOperacion.CMS },
+                { TipoOperacion.NOM_FXD, TipoOperacion.CMS },
+                { TipoOperacion.SER, TipoOperacion.CMS },
+                { TipoOperacion.TAX, TipoOperacion.CMS },
+
+                // Si la operación es una operación local de SPID o FXD, el gateway es "MW"
+                { TipoOperacion.SPID_Local, EnumComunes.SubTipoOperacionMW },
+                { TipoOperacion.FXD_Local, EnumComunes.SubTipoOperacionMW },
+
+                // Si la operación es una operación de GPH (SPID_GPH, TEF_GPH, FXD_GPH), el gateway es "GPH"
+                { TipoOperacion.SPID_GPH, EnumComunes.SubTipoOperacionGPH },
+                { TipoOperacion.TEF_GPH, EnumComunes.SubTipoOperacionGPH },
+                { TipoOperacion.FXD_GPH, EnumComunes.SubTipoOperacionGPH },
+
+                // Si la operación es una operación de H2H (SPID_H2H, TEF_H2H, FXD_H2H), el gateway es "H2H"
+                { TipoOperacion.SPID_H2H, EnumComunes.SubTipoOperacionH2H },
+                { TipoOperacion.TEF_H2H, EnumComunes.SubTipoOperacionH2H },
+                { TipoOperacion.FXD_H2H, EnumComunes.SubTipoOperacionH2H },
+            };
+
+            return mapeadorOperacion.TryGetValue(strTipoOperacion, out string puertaSalida)
+                ? puertaSalida
+                : TipoOperacion.FT;
+        }
+
+        /// <summary>
+        /// Obtiene el ID de la aplicación según el tipo de operación.
+        /// </summary>
+        /// <param name="strTipoOperacion">El tipo de operación.</param>
+        /// <returns>string</returns>
+        public string ObtenerAplicacionId(string strTipoOperacion)
+        {
+            if (string.IsNullOrWhiteSpace(strTipoOperacion))
+                throw new Exception("Error: tipo de operacion no puede ser null");
+
+            Dictionary<string, string> mapeadorOperacion = new Dictionary<string, string>()
+            {
+                // FXD
+                { TipoOperacion.ENT_SPEI, TipoOperacion.FXD },
+                { TipoOperacion.ENT_SPEI_2, TipoOperacion.FXD },
+                { TipoOperacion.FXD, TipoOperacion.FXD },
+                { TipoOperacion.FXD_Local, TipoOperacion.FXD },
+                { TipoOperacion.FXD_GPH, TipoOperacion.FXD },
+                { TipoOperacion.FXD_H2H, TipoOperacion.FXD },
+                { TipoOperacion.NOM_FXD, TipoOperacion.FXD },
+                { TipoOperacion.PaP_FXD, TipoOperacion.FXD },
+                { TipoOperacion.SER, TipoOperacion.FXD },
+                { TipoOperacion.TAX, TipoOperacion.FXD },
+
+                //SPD
+                { TipoOperacion.ENT_SPID, EnumComunes.SubTipoOperacionSPD },
+                { TipoOperacion.SPID, EnumComunes.SubTipoOperacionSPD  },
+                { EnumComunes.SubTipoOperacionSPD , EnumComunes.SubTipoOperacionSPD  },
+                { TipoOperacion.SPID_Local, EnumComunes.SubTipoOperacionSPD  },
+                { TipoOperacion.SPID_GPH, EnumComunes.SubTipoOperacionSPD  },
+                { TipoOperacion.SPID_H2H, EnumComunes.SubTipoOperacionSPD  },
+                { TipoOperacion.PaP_SPID, EnumComunes.SubTipoOperacionSPD  },
+
+                // TEF
+                { TipoOperacion.ENT_TEF, TipoOperacion.TEF },
+                { TipoOperacion.TEF, TipoOperacion.TEF },
+                { TipoOperacion.TEF_GPH, TipoOperacion.TEF },
+                { TipoOperacion.TEF_H2H, TipoOperacion.TEF },
+                { TipoOperacion.PaP_TEF, TipoOperacion.TEF },
+            };
+
+            return mapeadorOperacion.TryGetValue(strTipoOperacion, out string puertaSalida)
+                ? puertaSalida
+                : TipoOperacion.FT;
+        }
+
+        /// <summary>
+        /// Obtiene el subtipo de mensaje según el tipo de operación.
+        /// </summary>
+        /// <param name="strTipoOperacion">El tipo de operación.</param>
+        /// <returns>string</returns>
+        public string ObtenerSubTipoMensaje(string strTipoOperacion)
+        {
+            if (string.IsNullOrWhiteSpace(strTipoOperacion))
+                throw new Exception("Error: tipo de operacion no puede ser null");
+
+            Dictionary<string, string> mapeadorOperacion = new Dictionary<string, string>()
+            {
+                // SPID
+                { TipoOperacion.ENT_SPID, TipoOperacion.SPID },
+                { TipoOperacion.SPID_Local, TipoOperacion.SPID },
+                { TipoOperacion.SPID_GPH, TipoOperacion.SPID },
+                { TipoOperacion.SPID_H2H, TipoOperacion.SPID },
+                { TipoOperacion.PaP_SPID, TipoOperacion.SPID },
+                { TipoOperacion.SPID, TipoOperacion.SPID },
+                  
+                // TEF
+                { TipoOperacion.TEF, TipoOperacion.TEF },
+                { TipoOperacion.ENT_TEF, TipoOperacion.TEF },
+                { TipoOperacion.PaP_TEF, TipoOperacion.TEF },
+                { TipoOperacion.TEF_GPH, TipoOperacion.TEF },
+                { TipoOperacion.TEF_H2H, TipoOperacion.TEF },
+       
+                // SPEI
+                { TipoOperacion.ENT_SPEI, EnumComunes.SubTipoOperacionSPEI },
+                { TipoOperacion.ENT_SPEI_2, EnumComunes.SubTipoOperacionSPEI },
+                { TipoOperacion.FXD, EnumComunes.SubTipoOperacionSPEI },
+                { TipoOperacion.FXD_GPH, EnumComunes.SubTipoOperacionSPEI },
+                { TipoOperacion.FXD_H2H, EnumComunes.SubTipoOperacionSPEI },
+                { TipoOperacion.FXD_Local, EnumComunes.SubTipoOperacionSPEI },
+                { TipoOperacion.PaP_FXD, EnumComunes.SubTipoOperacionSPEI },
+   
+                // NOMICA
+                { TipoOperacion.NOM_FXD, EnumComunes.SubTipoOperacionNOMINA },
+
+                // SER
+                { TipoOperacion.SER, TipoOperacion.SER },
+
+                // TAX
+                { TipoOperacion.TAX, TipoOperacion.TAX },
+            };
+
+            return mapeadorOperacion.TryGetValue(strTipoOperacion, out string puertaSalida)
+                ? puertaSalida
+                : string.Empty;
+        }
+
+        /// <summary>
+        /// Obtiene el tipo de mensaje según el tipo de operación
+        /// </summary>
+        /// <param name="strTipoOperacion">El tipo de operación</param>
+        /// <returns>string</returns>
+        public string ObtenerTipoMensaje(string strTipoOperacion)
+        {
+            if (string.IsNullOrWhiteSpace(strTipoOperacion))
+                throw new Exception("Error: tipo de operacion no puede ser null");
+
+            Dictionary<string, string> mapeadorOperacion = new Dictionary<string, string>()
+            {
+                // SPD
+                {TipoOperacion.ENT_SPID, EnumComunes.SubTipoOperacionSPD },
+                {TipoOperacion.SPID_Local, EnumComunes.SubTipoOperacionSPD },
+                {TipoOperacion.SPID_GPH, EnumComunes.SubTipoOperacionSPD },
+                {TipoOperacion.SPID_H2H, EnumComunes.SubTipoOperacionSPD },
+                {TipoOperacion.PaP_SPID, EnumComunes.SubTipoOperacionSPD },
+                {TipoOperacion.SPID, EnumComunes.SubTipoOperacionSPD },
+
+                // FXD
+                {TipoOperacion.ENT_SPEI, TipoOperacion.FXD},
+                {TipoOperacion.ENT_SPEI_2, TipoOperacion.FXD},
+                {TipoOperacion.FXD, TipoOperacion.FXD},
+                {TipoOperacion.FXD_GPH, TipoOperacion.FXD},
+                {TipoOperacion.FXD_H2H, TipoOperacion.FXD},
+                {TipoOperacion.FXD_Local, TipoOperacion.FXD},
+                {TipoOperacion.PaP_FXD, TipoOperacion.FXD},
+
+                // NOM
+                {TipoOperacion.NOM_FXD, EnumComunes.SubTipoOperacionNOM},
+
+                // TEF
+                {TipoOperacion.TEF , TipoOperacion.TEF},
+                {TipoOperacion.ENT_TEF, TipoOperacion.TEF},
+                {TipoOperacion.PaP_TEF, TipoOperacion.TEF},
+                {TipoOperacion.TEF_GPH, TipoOperacion.TEF},
+                {TipoOperacion.TEF_H2H, TipoOperacion.TEF},
+                 
+                // SER
+                {TipoOperacion.SER, TipoOperacion.SER},
+                 
+                // TAX
+                {TipoOperacion.TAX, TipoOperacion.TAX}
+            };
+
+            return mapeadorOperacion.TryGetValue(strTipoOperacion, out string puertaSalida)
+                ? puertaSalida
+                : string.Empty;
+        }
+    }
+}
+********************
+using MUFG_T24.Comunes;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using System;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Utileria
+{
+    /// <summary>
+    /// Clase para generar firma digital
+    /// </summary>
+    public class CertificadoOperacion : ICertificadoOperacion
+    {
+        /// <summary>
+        /// Metodo para generar firma digital            
+        /// </summary>
+        /// <param name="byteTramaCompleta"></param>
+        /// <param name="strCredencialesCertificado"></param>
+        /// <param name="strRutaCertificado"></param>
+        /// <returns>string</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<string> GeneraFirma(byte[] byteTramaCompleta, string strCredencialesCertificado, string strRutaCertificado)
+        {
+            string resultBase64 = string.Empty;
+            try
+            {
+                // Ruta certificado y credenciales
+                string strDirCertificado = strRutaCertificado;
+                string strCredenciales = strCredencialesCertificado;
+
+                Config.EscribirLog("INFO|CertificadoLogic.GenerateSignAsync|strRutaCertificado : ************** " +  NombreServicio.HotScan.ToString());
+                Config.EscribirLog("INFO|CertificadoLogic.GenerateSignAsync|strCredencialesCertificado : ************* " +  NombreServicio.HotScan.ToString());
+
+                // Crea coleccion de certificado y se importa el certificado desde el archvio
+                X509Certificate2Collection objColecCertificado = new X509Certificate2Collection();
+                objColecCertificado.Import(strDirCertificado, strCredenciales, X509KeyStorageFlags.Exportable);
+
+                // Se obtiene primer certificado
+                X509Certificate2 certificado = objColecCertificado[0];
+
+                // Proveedor RSA
+                RSACryptoServiceProvider objClavePublica = (RSACryptoServiceProvider)certificado.PublicKey.Key;
+                RSACryptoServiceProvider objClavePrivada = new RSACryptoServiceProvider();
+
+                // Se carga la clave desde el certificado en XML
+                objClavePrivada.FromXmlString(certificado.PrivateKey.ToXmlString(true));
+                byte[] arrDatosFirma = byteTramaCompleta;
+
+                // Genera firma usando SHA256
+                byte[] arrFirma = await Task.Run(() => objClavePrivada.SignData(arrDatosFirma, CryptoConfig.MapNameToOID(EnumComunes.FirmaSHA256)));
+
+                // Valida la firma usando la clave publica
+                bool isValid = objClavePublica.VerifyData(arrDatosFirma, CryptoConfig.MapNameToOID(EnumComunes.FirmaSHA256), arrFirma);
+
+                // Si es valida convierte a Base64
+                if (isValid)
+                {
+                    resultBase64 = Convert.ToBase64String(arrFirma, 0, arrFirma.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|GenerateSign|Se presenta exception: " + ex.ToString());
+                throw;
+            }
+            return resultBase64;
+        }
+    }
+}
+*************************
+using MUFG_T24.Comunes;
+using Aplicacion.Enums;
+using Aplicacion.Modelos.FirmaDigital;
+using System;
+using System.Linq;
+
+namespace Aplicacion.Utileria
+{
+    /// <summary>
+    /// Obtine trama y convierte la devolucioon al tipo de dato
+    /// </summary>
+    public class Trama
+    {
+        /// <summary>
+        /// Log principal de log para todos los campos
+        /// </summary>
+        /// <param name="objOrdenPago"></param>
+        public static void LogueoDatosTrama(OrdenPago objOrdenPago)
+        {
+            Config.EscribirLog("INFO|ComunFXD.GeneraFirmaDigital|Se obtienen bytes de cada tipo de dato ", NombreServicio.HotScan.ToString());
+
+            LogCampo(EnumComunes.FirmaDigitalInsClaveBen, objOrdenPago.InsClaveBen);
+            LogCampo(EnumComunes.FirmaDigitalInsClaveOrd, objOrdenPago.InsClaveOrd);
+            LogCampo(EnumComunes.FirmaDigitalOpCuentaBen, objOrdenPago.OpCuentaBen);
+            LogCampo(EnumComunes.FirmaDigitalOpCuentaBen2, objOrdenPago.OpCuentaBen2);
+            LogCampo(EnumComunes.FirmaDigitalOpCuentaOrd, objOrdenPago.OpCuentaOrd);
+            LogCampo(EnumComunes.FirmaDigitalOpCveRastreo, objOrdenPago.OpCveRastreo);
+            LogCampo(EnumComunes.FirmaDigitalOpFechaOper, objOrdenPago.OpFechaOper);
+            LogCampo(EnumComunes.FirmaDigitalOpMonto, objOrdenPago.OpMonto);
+
+            if (objOrdenPago.TramaCompleta != null && objOrdenPago.TramaCompleta.Length > 0)
+            {
+                Config.EscribirLog("INFO|ComunFXD.GeneraFirmaDigital|La trama armada es " + MuestraTrama(objOrdenPago.TramaCompleta), NombreServicio.HotScan.ToString());
+            }
+        }
+
+        /// <summary>
+        /// Auxiliar para validacion y logging
+        /// </summary>
+        /// <param name="strNombre"></param>
+        /// <param name="arrValor"></param>
+        private static void LogCampo(string strNombre, byte[] arrValor)
+        {
+            // solo logueamos si hay contenido
+            if (arrValor != null && arrValor.Length > 0)
+            {
+                Config.EscribirLog($"INFO|ComunFXD.GeneraFirmaDigital|+{strNombre} {MuestraTrama(arrValor)}", NombreServicio.HotScan.ToString());
+            }
+        }
+
+        /// <summary>
+        /// Convierte arreglo a una representacion en string
+        /// </summary>
+        /// <param name="arreglo"></param>
+        /// <returns></returns>
+        private static string MuestraTrama(byte[] arreglo)
+        {
+            return arreglo == null ? string.Empty : BitConverter.ToString(arreglo);
+        }
+
+        /// <summary>
+        /// Obtiene Trama
+        /// </summary>
+        /// <param name="objOrderPagoValor"></param>
+        /// <returns>OrdenPago</returns>
+        /// <exception cref="Exception"></exception>
+        public static OrdenPago ObtieneTrama(OrdenPagoValor objOrderPagoValor)
+        {
+            OrdenPago objConversiones = new OrdenPago();
+            // Conversion tipo pago a entero
+            short shortTipoPago = Convert.ToInt16(objOrderPagoValor.TpPago);
+
+            // Log valores originales
+            LogValoresEntrada(objOrderPagoValor);
+
+            try
+            {
+                switch (shortTipoPago)
+                {
+                    // Devoluciones
+                    case 0:
+                        Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|Se inicia proceso de conversión de bytes tipo Devolucion", NombreServicio.HotScan.ToString());
+                        objConversiones = Devoluciones(objOrderPagoValor, objConversiones);
+                        break;
+                    // Tercero Tercero
+                    case 1:
+                        Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|Se inicia proceso de conversión de bytes tipo tercero tercero", NombreServicio.HotScan.ToString());
+                        objConversiones = TerceroATercero(objOrderPagoValor, objConversiones);
+                        break;
+                    // Participante a tercero
+                    case 5:
+                        Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|Se inicia proceso de conversión de bytes tipo Participante a tercero", NombreServicio.HotScan.ToString());
+                        objConversiones = ParticipanteATercero(objOrderPagoValor, objConversiones);
+                        break;
+
+                    // Participante a Vostro
+                    case 6:
+                        Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|Se inicia proceso de conversión de bytes tipo Participante a Vostro", NombreServicio.HotScan.ToString());
+                        objConversiones = ParticipanteAVostro(objOrderPagoValor, objConversiones);
+
+                        break;
+
+                    // Participante a Participante
+                    case 7:
+                        // FechaOperacion + CveInstOrd + CveInstBen + CveRastreo + Monto
+                        Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|Se inicia proceso de conversión de bytes tipo Participante a Participante", NombreServicio.HotScan.ToString());
+                        objConversiones = ParticipanteAParticipante(objOrderPagoValor, objConversiones);
+                        break;
+
+                    // Tercero a Tercero Vostro
+                    case 3:
+                        // FechaOperacion + CveInstOrd + CveInstBen + CveRastreo + Monto + CuentaOrd + CuentaBen + CuentaBen2
+                        Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|Se inicia proceso de conversión de bytes tipo Tercero a Tercero Vostro", NombreServicio.HotScan.ToString());
+                        objConversiones = TerceroATerceroVostro(objOrderPagoValor, objConversiones);
+                        break;
+                    default:
+                        throw new Exception("No existe definición para pago SPEI del tipo de pago " + shortTipoPago);
+                }
+                Trama.LogueoDatosTrama(objConversiones);
+            }
+            catch (Exception lexError)
+            {
+                Config.EscribirLog("ERROR|ComunFXD.ObtieneTrama|Se presenta exception: " + lexError.ToString());
+                throw;
+            }
+            return objConversiones;
+        }
+
+        /// <summary>
+        /// Obtiene trama SPID
+        /// </summary>
+        /// <param name="objOrderPagoValor"></param>
+        /// <returns>OrdenPago</returns>
+        /// <exception cref="Exception"></exception>
+        public static OrdenPago ObtieneTramaSpid(OrdenPagoValor objOrderPagoValor)
+        {
+            OrdenPago objConversiones = new OrdenPago();
+            // Conversion tipo pago a entero
+            short shortTipoPago = Convert.ToInt16(objOrderPagoValor.TpPago);
+
+            // Log valores originales
+            LogValoresEntrada(objOrderPagoValor);
+
+            try
+            {
+                switch (shortTipoPago)
+                {
+                    // Devoluciones
+                    case 0:
+                        Config.EscribirLog("INFO|ObtieneTramaSPID|Se inicia proceso de conversión de bytes tipo Devolucion", NombreServicio.HotScan.ToString());
+                        objConversiones = Devoluciones(objOrderPagoValor, objConversiones);
+                        break;
+                    // Tercero Tercero
+                    case 1:
+                        Config.EscribirLog("INFO|ObtieneTramaSPID|Se inicia proceso de conversión de bytes tipo tercero tercero", NombreServicio.HotScan.ToString());
+                        objConversiones = TerceroATercero(objOrderPagoValor, objConversiones);
+                        break;
+                    // Participante a tercero
+                    case 2:
+                        Config.EscribirLog("INFO|ObtieneTramaSPID|Se inicia proceso de conversión de bytes tipo Participante a tercero", NombreServicio.HotScan.ToString());
+                        objConversiones = ParticipanteATercero(objOrderPagoValor, objConversiones);
+                        break;
+                    default:
+                        throw new Exception("No existe definición para pago SPEI del tipo de pago " + shortTipoPago);
+                }
+                Trama.LogueoDatosTrama(objConversiones);
+            }
+            catch (Exception lexError)
+            {
+                Config.EscribirLog("ERROR|ComunFXD.ObtieneTramaSpid|Se presenta exception: " + lexError.ToString());
+                throw;
+            }
+            return objConversiones;
+        }
+
+        /// <summary>
+        /// Proceso conversion Tercero a tercero vostro
+        /// </summary>
+        /// <param name="objOrderPago"></param>
+        /// <param name="objConversiones"></param>
+        /// <returns>OrdenPago</returns>
+        private static OrdenPago TerceroATerceroVostro(OrdenPagoValor objOrderPago, OrdenPago objConversiones)
+        {
+            byte[] arrayZero = new byte[] { };
+            objConversiones.OpFechaOper = ToDateBytes(objOrderPago.OpFechaOper);
+            objConversiones.InsClaveOrd = ToIntBytes(objOrderPago.InsClaveOrd);
+            objConversiones.InsClaveBen = ToIntBytes(objOrderPago.InsClaveBen);
+            objConversiones.OpCveRastreo = objOrderPago.OpCveRastreo.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+            objConversiones.OpMonto = ToMoneyBytes(objOrderPago.OpMonto);
+
+            objConversiones.OpCuentaOrd = objOrderPago.OpCuentaOrd.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+            objConversiones.OpCuentaBen = objOrderPago.OpCuentaBen.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+
+            objConversiones.OpCuentaBen2 = arrayZero.AddZeroByte();
+            objConversiones.TramaCompleta = objConversiones.OpFechaOper
+                .Concat(objConversiones.InsClaveOrd)
+                .Concat(objConversiones.InsClaveBen)
+                .Concat(objConversiones.OpCveRastreo)
+                .Concat(objConversiones.OpMonto)
+                .Concat(objConversiones.OpCuentaOrd)
+                .Concat(objConversiones.OpCuentaBen)
+                .Concat(objConversiones.OpCuentaBen2).ToArray();
+            return objConversiones;
+        }
+
+        /// <summary>
+        /// Proceso conversion Participante a participante
+        /// </summary>
+        /// <param name="objOrderPago"></param>
+        /// <param name="objConversiones"></param>
+        /// <returns>OrdenPago</returns>
+        private static OrdenPago ParticipanteAParticipante(OrdenPagoValor objOrderPago, OrdenPago objConversiones)
+        {
+            objConversiones.OpFechaOper = ToDateBytes(objOrderPago.OpFechaOper);
+            objConversiones.InsClaveOrd = ToIntBytes(objOrderPago.InsClaveOrd);
+            objConversiones.InsClaveBen = ToIntBytes(objOrderPago.InsClaveBen);
+            objConversiones.OpCveRastreo = objOrderPago.OpCveRastreo.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+            objConversiones.OpMonto = ToMoneyBytes(objOrderPago.OpMonto);
+
+            objConversiones.TramaCompleta = objConversiones.OpFechaOper
+                .Concat(objConversiones.InsClaveOrd)
+                .Concat(objConversiones.InsClaveBen)
+                .Concat(objConversiones.OpCveRastreo)
+                .Concat(objConversiones.OpMonto).ToArray();
+            return objConversiones;
+        }
+
+        /// <summary>
+        /// Proceso conversion Participante a vostro
+        /// FechaOperacion + CveInstOrd + CveInstBen + CveRastreo + Monto + CuentaBen + CuentaBen2
+        /// </summary>
+        /// <param name="objOrderPago"></param>
+        /// <param name="objConversiones"></param>
+        /// <returns>OrdenPago</returns>
+        private static OrdenPago ParticipanteAVostro(OrdenPagoValor objOrderPago, OrdenPago objConversiones)
+        {
+            byte[] arrayZero = new byte[] { };
+            objConversiones.OpFechaOper = ToDateBytes(objOrderPago.OpFechaOper);
+            objConversiones.InsClaveOrd = ToIntBytes(objOrderPago.InsClaveOrd);
+            objConversiones.InsClaveBen = ToIntBytes(objOrderPago.InsClaveBen);
+            objConversiones.OpCveRastreo = objOrderPago.OpCveRastreo.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+            objConversiones.OpMonto = ToMoneyBytes(objOrderPago.OpMonto);
+
+            objConversiones.OpCuentaBen = objOrderPago.OpCuentaBen.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+
+            objConversiones.OpCuentaBen2 = arrayZero.AddZeroByte();
+            objConversiones.TramaCompleta = objConversiones.OpFechaOper
+                .Concat(objConversiones.InsClaveOrd)
+                .Concat(objConversiones.InsClaveBen)
+                .Concat(objConversiones.OpCveRastreo)
+                .Concat(objConversiones.OpMonto)
+                .Concat(objConversiones.OpCuentaBen)
+                .Concat(objConversiones.OpCuentaBen2).ToArray();
+            return objConversiones;
+        }
+
+        /// <summary>
+        /// Proceso conversion Participante a tercero
+        /// FechaOperacion + CveInstOrd + CveInstBen + CveRastreo + Monto + CuentaBen
+        /// </summary>
+        /// <param name="objOrderPago"></param>
+        /// <param name="objConversiones"></param>
+        /// <returns>OrdenPago</returns>
+        private static OrdenPago ParticipanteATercero(OrdenPagoValor objOrderPago, OrdenPago objConversiones)
+        {
+            objConversiones.OpFechaOper = ToDateBytes(objOrderPago.OpFechaOper);
+            objConversiones.InsClaveOrd = ToIntBytes(objOrderPago.InsClaveOrd);
+            objConversiones.InsClaveBen = ToIntBytes(objOrderPago.InsClaveBen);
+            objConversiones.OpCveRastreo = objOrderPago.OpCveRastreo.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+            objConversiones.OpMonto = ToMoneyBytes(objOrderPago.OpMonto);
+
+            objConversiones.OpCuentaBen = objOrderPago.OpCuentaBen.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+            objConversiones.TramaCompleta = objConversiones.OpFechaOper
+                .Concat(objConversiones.InsClaveOrd)
+                .Concat(objConversiones.InsClaveBen)
+                .Concat(objConversiones.OpCveRastreo)
+                .Concat(objConversiones.OpMonto)
+                .Concat(objConversiones.OpCuentaBen).ToArray();
+            return objConversiones;
+        }
+
+        /// <summary>
+        /// Proceso conversion Devoluciones
+        /// FechaOperacion + CveInstOrd + CveInstBen + CveRastreo + Monto
+        /// </summary>
+        /// <param name="objOrderPago"></param>
+        /// <param name="objConversiones"></param>
+        /// <returns>OrdenPago</returns>
+        private static OrdenPago Devoluciones(OrdenPagoValor objOrderPago, OrdenPago objConversiones)
+        {
+            objConversiones.OpFechaOper = ToDateBytes(objOrderPago.OpFechaOper);
+            objConversiones.InsClaveOrd = ToIntBytes(objOrderPago.InsClaveOrd);
+            objConversiones.InsClaveBen = ToIntBytes(objOrderPago.InsClaveBen);
+            objConversiones.OpCveRastreo = objOrderPago.OpCveRastreo.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+            objConversiones.OpMonto = ToMoneyBytes(objOrderPago.OpMonto);
+
+            objConversiones.TramaCompleta = objConversiones.OpFechaOper
+                .Concat(objConversiones.InsClaveOrd)
+                .Concat(objConversiones.InsClaveBen)
+                .Concat(objConversiones.OpCveRastreo)
+                .Concat(objConversiones.OpMonto).ToArray();
+            return objConversiones;
+        }
+
+        /// <summary>
+        /// Proceso conversion Tercero a tercero
+        /// FechaOperacion + CveInstOrd + CveInstBen + CveRastreo + Monto + CuentaOrd + CuentaBen
+        /// </summary>
+        /// <param name="objOrderPago"></param>
+        /// <param name="objConversiones"></param>
+        /// <returns></returns>
+        private static OrdenPago TerceroATercero(OrdenPagoValor objOrderPago, OrdenPago objConversiones)
+        {
+            objConversiones.OpFechaOper = ToDateBytes(objOrderPago.OpFechaOper);
+            objConversiones.InsClaveOrd = ToIntBytes(objOrderPago.InsClaveOrd);
+            objConversiones.InsClaveBen = ToIntBytes(objOrderPago.InsClaveBen);
+            objConversiones.OpCveRastreo = objOrderPago.OpCveRastreo.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+            objConversiones.OpMonto = ToMoneyBytes(objOrderPago.OpMonto);
+
+            objConversiones.OpCuentaOrd = objOrderPago.OpCuentaOrd.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+            objConversiones.OpCuentaBen = objOrderPago.OpCuentaBen.ToString().StringToByteArray(ByteOrder.BIG_ENDIAN);
+
+            objConversiones.TramaCompleta = objConversiones.OpFechaOper
+                .Concat(objConversiones.InsClaveOrd)
+                .Concat(objConversiones.InsClaveBen)
+                .Concat(objConversiones.OpCveRastreo)
+                .Concat(objConversiones.OpMonto)
+                .Concat(objConversiones.OpCuentaOrd)
+                .Concat(objConversiones.OpCuentaBen).ToArray();
+
+            return objConversiones;
+        }
+
+        // Metodos auxiliares para conviercion a bytes
+        private static byte[] ToIntBytes(object valor) => Convert.ToInt32(valor).IntToByteArray(ByteOrder.BIG_ENDIAN);
+        private static byte[] ToDateBytes(object valor) => Convert.ToInt32(valor).DateToByteArray(ByteOrder.BIG_ENDIAN);
+        private static byte[] ToMoneyBytes(object valor) => Convert.ToDouble(valor).MoneyToByteArray(ByteOrder.BIG_ENDIAN);
+
+
+
+        /// <summary>
+        /// Centraliza logs de valores de entrada
+        /// </summary>
+        /// <param name="objOrderPago"></param>
+        private static void LogValoresEntrada(OrdenPagoValor objOrderPago)
+        {
+            Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|InsClaveOrd = " + objOrderPago.InsClaveOrd, NombreServicio.HotScan.ToString());
+            Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|OpFechaOper = " + objOrderPago.OpFechaOper, NombreServicio.HotScan.ToString());
+            Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|InsClaveBen = " + objOrderPago.InsClaveBen, NombreServicio.HotScan.ToString());
+            Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|OpMonto = " + objOrderPago.OpMonto, NombreServicio.HotScan.ToString());
+            Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|OpCveRastreo = " + objOrderPago.OpCveRastreo, NombreServicio.HotScan.ToString());
+            Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|OpCuentaOrd = " + objOrderPago.OpCuentaOrd, NombreServicio.HotScan.ToString());
+            Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|OpCuentaBen = " + objOrderPago.OpCuentaBen, NombreServicio.HotScan.ToString());
+            Config.EscribirLog("INFO|ComunFXD.ObtieneTrama|TpPago = " + objOrderPago.TpPago, NombreServicio.HotScan.ToString());
+        }
+    }
+}
+******
+
+using MUFG_T24.Modelos;
+using Aplicacion.Modelos;
+using Aplicacion.Modelos.Tomi;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using AplicacionHotScan.DTOs;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interfaz para implementar procedimiento de operaciones
+    /// </summary>
+    public interface IOperaciones
+    {
+        /// <summary>
+        /// Actualiza puerto
+        /// </summary>
+        /// <param name="intPuerto"></param>
+        /// <returns></returns>
+        Task ActualizaPuerto(int intPuerto);
+
+        /// <summary>
+        /// Actualiza terminacion del proceso
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <returns></returns>
+        Task ActualizaTerminacion(string strNombreServicio, int? intgpId, string strNombreProceso);
+
+        /// <summary>
+        /// Obtiene la lista de configuracion de Hotscan
+        /// </summary>
+        /// <param name="strLlave"></param>
+        /// <returns>List<ConfiguracionGeneral></returns>
+        Task<List<ConfiguracionGeneral>> ObtenerConfiguracionGeneralHotScan(string strLlave = null);
+
+        /// <summary>
+        /// Inserta alertas
+        /// </summary>
+        /// <param name="alerta"></param>
+        /// <returns></returns>
+        Task InsertaAlerta(AlertaDTO alerta);
+
+        /// <summary>
+        /// Proceso servicio
+        /// </summary>
+        /// <returns>Proceso</returns>
+        Task<Proceso> ObtieneDatosProceso();
+
+        /// <summary>
+        /// Procedimiento para procesar folios (solo valida que estan las bases arriba y no este procesando nada)
+        /// </summary>
+        /// <param name="folios"></param>
+        /// <returns>true/false</returns>
+        Task<bool> ProcesaFolios(List<SolicitudOperacionDto> foliosList);
+
+        /// <summary>
+        /// Proceso folios y actualiza estatus del folio HOTSCAN
+        /// </summary>
+        /// <param name="lstFolios"></param>
+        /// <returns>true/false</returns>
+        Task<bool> EjecutaProcedimientos(List<SolicitudOperacionDto> lstFolios);
+
+        /// <summary>
+        /// Escucha puerto disponible
+        /// </summary>
+        /// <param name="strServicio"></param>
+        /// <returns>PuertoServicioDTO</returns>
+        Task<PuertoServicioDTO> ObtenerPuerto(string strServicio);
+
+        /// <summary>
+        /// Funcion escucha puerto disponible
+        /// </summary>
+        /// <param name="intPuerto"></param>
+        /// <param name="strServicio"></param>
+        /// <param name="intPId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strDisplayName"></param>
+        /// <param name="funcProcesar"></param>
+        /// <param name="boolEnviarRespuesta"></param>
+        /// <returns></returns>
+        Task ProcesoEscuchaPuerto(int intPuerto, string strServicio, int? intPId, string strNombreProceso, string strDisplayName, Delegate funcProcesar, bool boolEnviarRespuesta);
+    }
+}
+
+*******************
+using Aplicacion.Modelos;
+using Aplicacion.Modelos.Tomi;
+using AplicacionHotScan.DTOs;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interfaz para impementar metodos de consulta a la BD InterfacesT24
+    /// </summary>
+    public interface IRepositorioTomi
+    {
+        /// <summary>
+        /// Actualiza puerto
+        /// </summary>
+        /// <param name="intPuerto"></param>
+        /// <returns></returns>
+        Task ActualizaPuerto(int intPuerto);
+
+        /// <summary>
+        /// Obtiene puerto disponible
+        /// </summary>
+        /// <param name="strServicio"></param>
+        /// <returns>PuertoServicioDTO</returns>
+        Task<PuertoServicioDTO> ObtenerPuertoServicio(string strServicio);
+
+        /// <summary>
+        /// Funcion escucha puerto disponible
+        /// </summary>
+        /// <param name="intPuerto"></param>
+        /// <param name="strServicio"></param>
+        /// <param name="intPId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strDisplayName"></param>
+        /// <param name="funcProcesar"></param>
+        /// <param name="boolEnviarRespuesta"></param>
+        /// <returns></returns>
+        Task ProcesoEscuchaPuerto(int intPuerto, string strServicio, int? intPId, string strNombreProceso, string strDisplayName, Delegate funcProcesar, bool boolEnviarRespuesta);
+
+        /// <summary>
+        /// Actualiza terminacion del proceso
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <returns></returns>
+        Task ProcesoActualizaTerminacion(string strNombreServicio, int? intgpId, string strNombreProceso);
+
+        /// <summary>
+        /// Captura si hubo un error en el proceso
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strNombreServico"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strAlias"></param>
+        /// <param name="strExepcion"></param>
+        /// <returns></returns>
+        Task EjecutaErrorProceso(string strFolio, string strNombreServico, string strNombreProceso, string strTipoOperacion, int? intgpId, string strAlias, Exception strExepcion);
+
+        /// <summary>
+        /// Actualiza folio maestro con estatus fecha futura o FC terminado del plan maestro
+        /// </summary>
+        /// <param name="strFolioMaestro"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strFechaTomi"></param>
+        /// <returns></returns>
+        Task<int> ActualizaEstatusFechaFuturaPlanMaestroFolioMaestro(string strFolioMaestro, string strTipoOperacion, string strFechaTomi);
+
+        /// <summary>
+        /// Actualiza estatus a fecha futura en plan maestro
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strFechaTomi"></param>
+        /// <returns></returns>
+        Task ActualizaEstatusFechaFuturaPlanMaestro(string strFolio, string strTipoOperacion, string strFechaTomi);
+
+        /// <summary>
+        /// Inserta folio y tipo de operacion en tabla de Control devoluciones
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        Task InsertaFolioOpControlDevoluciones(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Actualiza estatus plan maestroa Hotscan
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>Parametros</returns>
+        Task<Parametros> ConsultaEstatusFCM(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Actualiza estatus plan maestroa Hotscan
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        Task ActualizaPlanMaestroEstatusHotscan(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Actualiza estatus plan detalle si es diferente el servicio de ActualizaEstatus
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        Task ActualizaPlanDetalleDifActualizaEstatus(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Actualiza el estatus RECC en tabla de operacion
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strCampoTipoOperacion"></param>
+        /// <param name="strTablaBase"></param>
+        /// <returns></returns>
+        Task ActualizaEstatusReccTablaOperacion(string strFolio, string strCampoTipoOperacion, string strTablaBase);
+
+        /// <summary>
+        /// Actualiza plan maestro estatus Cancelado
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strRazonRechazo"></param>
+        /// <returns></returns>
+        Task ActualizaEstatusCancelPlanMaestro(string strFolio, string strTipoOperacion, string strRazonRechazo);
+
+        /// <summary>
+        /// Actualiza plan detalle
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        Task ActualizaPlanDetalle(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Actualiza estatus CANCEL tabla de intercambio FCM
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        Task ActualizaEstatusCancelIntercambio(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Consulta estatus Sentinel intercambio
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>string</returns>
+        Task<Parametros> ConsultaEstatusSentinel(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Consulta de operaciones H2H, GPH, ENT
+        /// parametro intTipoConsulta sirva para evaluar el contenido del select:
+        ///  1 = 'NF_ESTATUS'
+        ///  2 = 'NF_ESTATUS'
+        ///  3 = 'NF_ESTATUS, NF_FECHA_EJECUCION, NF_NOMBRE_ARCHIVO_GPH, NF_PMT_INF_ID, NF_ID_ARCHIVO'
+        ///  4 = 'NF_ESTATUS, NF_FECHA_EJECUCION, NF_NOMBRE_ARCHIVO_H2H'	
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <param name="strCampoFiltro"></param>
+        /// <param name="intTipoConulta"></param>
+        /// <returns>OperacionEntGphH2h</returns>
+        Task<OperacionEntGphH2h> ConsultaOperacionEntGphH2h(string strFolio, string strTablaBase, string strCampoFiltro, int intTipoConulta);
+
+        /// <summary>
+        /// Fin estatus del proceso
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strNombreServico"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strAlias"></param>
+        /// <returns></returns>
+        Task EjecutaTerminoProceso(string strFolio, string strNombreServico, string strNombreProceso, string strTipoOperacion, int? intgpId, string strAlias);
+
+        /// <summary>
+        /// Actualiza estatus del folio maestro a Hotscan
+        /// </summary>
+        /// <param name="strFolioMaestro"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>int</returns>
+        Task<int> ActualizaEstatusFolioMaestroHotScan(string strFolioMaestro, string strTipoOperacion);
+
+        /// <summary>
+        /// Proceso para obtener el folio maestro
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>string</returns>
+        Task<string> ProcesoObtenerFolioMaestro(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Actualiza estatus inicio hotscan
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        Task ActualizaEstatusInicioHotScan(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Inicio del proceso
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strNombreServico"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strAlias"></param>
+        /// <returns></returns>
+        Task EjecutaInicioProceso(string strFolio, string strNombreServico, string strNombreProceso, string strTipoOperacion, int? intgpId, string strAlias);
+
+        /// <summary>
+        /// Obtiene alias del proceso
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strNombreServico"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>string</returns>
+        Task<string> ObtieneUltimoProceso(string strFolio, string strNombreServico, string strTipoOperacion);
+
+        /// <summary>
+        /// Actualiza ejecucion del servicio INICIO
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <returns></returns>
+        Task ProcesoActualizaEjecucion(string strNombreServicio, int? intgpId, string strNombreProceso);
+
+        /// <summary>
+        /// Actualiza tabla de control ENT_SPEI
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        Task ActualizaControlDevolucion(long strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Llena proceso
+        /// </summary>
+        /// <returns>Proceso</returns>
+        Task<Proceso> DatosProceso();
+
+        /// <summary>
+        ///  Obtiene los parametros de HotScan
+        /// </summary>
+        /// <returns>Dictionary<string, string></returns>
+        Task<Dictionary<string, string>> ObtenerParametrosHotScan();
+
+        /// <summary>
+        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones.
+        /// </summary>
+        /// <returns>Dictionary<string, string></returns>
+        Task<Dictionary<string, string>> ObtenerParametrosSistema();
+
+        /// <summary>
+        /// Obtiene las fechas del sistema
+        /// </summary>
+        /// <returns>Parametros</returns>
+        Task<string> ObtenerFechaSistema();
+
+        /// <summary>
+        /// Obtiene fecha de ejecucion
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>Parametros</returns>
+        Task<Parametros> ObtenerFechaEjecucion(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Obtener control de escaneo Hotscan
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>List<ControlEscaneoHotScan></returns>
+        Task<List<ControlEscaneoHotScan>> ObtenerControlEscaneoHotScan(string strFolio, string strTipoOperacion);
+
+        /// <summary>
+        /// Analisis escaneo de folio
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="bBanderaAnalizador"></param>
+        /// <returns>true/false</returns>
+        Task<bool> ValidaControlEscaneoHotScan(string strFolio, string strTipoOperacion, string bBanderaAnalizador);
+
+        /// <summary>
+        /// Actualiza plan de trabajo maestro
+        /// </summary>
+        /// <param name="planTrabajoMaestroDto"></param>
+        /// <returns>true/false</returns>
+        Task<bool> ActualizaPlanTrabajoMaestro(PlanTrabajoMaestroDto planTrabajoMaestroDto);
+
+        /// <summary>
+        /// Obtiene la lista de configuracion de Hotscan
+        /// </summary>
+        /// <param name="strLlave"></param>
+        /// <returns>List<ConfiguracionGeneral></returns>
+        Task<List<ConfiguracionGeneral>> ObtenerConfiguracionGeneralHotScan(string strLlave = null);
+
+        /// <summary>
+        /// Obtiene la lista de configuracion del analizador de Hotscan 
+        /// </summary>
+        /// <returns>List<ConfiguracionAnalizadorConector></returns>
+        Task<List<ConfiguracionAnalizadorConector>> ObtenerConfiguracionAnalizadorHotScan();
+
+        /// <summary>
+        /// Desactivacion automatica de analizador Hotscan
+        /// </summary>
+        /// <param name="intId"></param>
+        /// <returns>true/false</returns>
+        Task<bool> DesactivaAnalizadorHotScan(int intId);
+
+        /// <summary>
+        /// Reactivacion automatica de analizador Hotscan
+        /// </summary>
+        /// <param name="intId"></param>
+        /// <returns></returns>
+        Task<bool> ActivaAnalizadorHotScan(int intId);
+
+        /// <summary>
+        /// Valida si el folio es banco
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns></returns>
+        Task<Parametros> ValidacionExisteFolio(string strFolio);
+
+        /// <summary>
+        /// Obtiene codigo de cliente tabla FXD_Local
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns>ClienteFxdLocal</returns>
+        Task<ClienteFxdLocal> ConsultaCodigoClienteFxdLocal(string strFolio);
+
+        /// <summary>
+        /// Obtiene el sector del cliente
+        /// </summary>
+        /// <param name="strCodigoCliente"></param>
+        /// <returns>int</returns>
+        Task<Parametros> ValidaEsbancoVistaT24(string strCodigoCliente);
+
+        /// <summary>
+        /// Obtiene cargo FXI del folio
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns>string</returns>
+        Task<Parametros> ObtieneCargoFxi(string strFolio);
+
+        /// <summary>
+        /// Obtiene el motivo de devolucion Entidad TEF
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns>int</returns>
+        Task<Parametros> ObtieneMotivoDevolucionEntTef(string strFolio);
+
+        /// <summary>
+        /// Consulta tipo de transaccion de la operacion
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strSubOperacion"></param>
+        /// <returns>string</returns>
+        Task<Parametros> ObtieneTipoTransaccionTrx(string strTipoOperacion, string strSubOperacion);
+
+        /// <summary>
+        /// Consulta datos para inspeccion de operaciones dinamicamente
+        /// parametro intTipoConsulta sirve para evaluar el contenido del select:
+        ///  1 = 'NF_ESTATUS, T24_DEBIT_AMOUNT,NF_TIPO,T24_DEBIT_CURRENCY,NF_FOLIO,NF_FOLIO_UNICO,T24_BEN_CUST_NAME,T24_COMPANY_NAME,NF_FECHA_EJECUCION,ISNULL(T24_DEBIT_THEIR_REF,'''') AS T24_DEBIT_THEIR_REF'
+		///  2 = 'NF_ESTATUS, T24_AMOUNT as T24_DEBIT_AMOUNT,NF_TIPO,T24_CURRENCY as T24_DEBIT_CURRENCY,NF_FOLIO,NF_FOLIO_UNICO,T24_BEN_CUST_NAME,T24_COMPANY_NAME,NF_FECHA_EJECUCION,ISNULL(T24_CONCEPT,'''') AS T24_DEBIT_THEIR_REF'
+		///  3 = 'NF_ESTATUS, T24_DEBIT_AMOUNT,''ESD'' as NF_TIPO,T24_DEBIT_CURRENCY,NF_FOLIO,NF_FOLIO_UNICO,RTRIM(LTRIM(ISNULL(op_nom_ben,'''')+'' ''+ISNULL(op_nom_ben2,''''))) AS T24_BEN_CUST_NAME, ISNULL(op_nom_ord,NF_BANCO_BENEF) as T24_COMPANY_NAME,NF_FECHA_EJECUCION,ISNULL(OP_CONCEPTO_PAG2,'''') AS T24_DEBIT_THEIR_REF,  ISNULL(cd_clave,0) AS MotivoDevolucion'
+		///  4 = 'NF_ESTATUS, T24_DEBIT_AMOUNT,''ETF'' as NF_TIPO,T24_DEBIT_CURRENCY,NF_FOLIO,NF_FOLIO_UNICO,NombreOrdenante AS T24_BEN_CUST_NAME,T24_COMPANY_NAME,NF_FECHA_EJECUCION,T24_PAYMENT_DETAILS AS T24_DEBIT_THEIR_REF, MotivoDevolucion'
+		///  5 = 'NF_ESTATUS, T24_DEBIT_AMOUNT,''ESP'' as NF_TIPO,T24_DEBIT_CURRENCY,op_clave as NF_FOLIO,NF_FOLIO_UNICO,RTRIM(LTRIM(ISNULL(op_nom_ben,'''')+'' ''+ISNULL(op_nom_ben2,''''))) AS T24_BEN_CUST_NAME,ISNULL(op_nom_ord,NF_BANCO_BENEF) as T24_COMPANY_NAME,NF_FECHA_EJECUCION,ISNULL(OP_CONCEPTO_PAG2,'''') AS T24_DEBIT_THEIR_REF, ISNULL(cd_clave,0) AS MotivoDevolucion'	        
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <param name="strCampoFiltro"></param>
+        /// <param name="intTipoConculta"></param>
+        /// <param name="strProcAlmacenado"></param>
+        /// <returns></returns>
+        Task<TablaBaseOperacionGrupo> EjecutaProcedimientoDinamico(string strFolio, string strTablaBase, string strCampoFiltro, int intTipoConculta, string strProcAlmacenado);
+
+        /// <summary>
+        /// Actualiza folio con nuevo estatus
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <param name="strNuevoEstatus"></param>
+        /// <param name="strCampoFolio"></param>
+        /// <returns>true/false</returns>
+        Task<bool> ActualizaNuevoEstatus(string strFolio, string strTablaBase, string strNuevoEstatus, string strCampoFolio);
+
+        /// <summary>
+        /// Inserta alertas
+        /// </summary>
+        /// <param name="alerta"></param>
+        /// <returns></returns>
+        Task InsertaAlerta(AlertaDTO alerta);
+
+        /// <summary>
+        /// Actualiza cancelacion de folio por estatus RECC
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strFolioUnico"></param>
+        /// <returns>true/false</returns>
+        Task<bool> ActualizaCancelacionOperacionFcm(string strFolio, string strFolioUnico);
+
+        /// <summary>
+        /// Inserta registro en tabla de intercambio
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strSolicitudXml"></param>
+        /// <returns>StoredProcedureResult</returns>
+        Task<StoredProcedureResult> InsertaFolioTablaIntercambio(string strFolio, string strTipoOperacion, string strSolicitudXml);
+    }
+
+}
+
+*****************
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using MUFG_T24.Enums_utilidades;
+using AplicacionHotScan.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Modelos.Tomi;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Servicio
+{
+    /// <summary>
+    /// Repositorio InterfacesT24 (TOMI) y VistasT24
+    /// </summary>
+    public class RepositorioTomi : RepositorioMaestro, IRepositorioTomi
+    {
+        private readonly Alertas _alertas;
+        public RepositorioTomi(Alertas alertas) : base(
+                  BasedatosProveedor.SqlServer, NombreBasedatos.TOMI,
+                  BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW)
+        {
+            _alertas = alertas;
+        }
+
+        /// <summary>
+        /// Actualiza puerto
+        /// </summary>
+        /// <param name="intPuerto"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaPuerto(int intPuerto)
+        {
+            StoredProcedureResult objResultadoSp =
+                await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizarPuerto, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Puerto", intPuerto));
+                });
+
+            if (!objResultadoSp.Exito) 
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaPuerto");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+
+        /// <summary>
+        /// Obtiene puerto disponible
+        /// </summary>
+        /// <param name="strServicio"></param>
+        /// <returns>PuertoServicioDTO</returns>
+        public async Task<PuertoServicioDTO> ObtenerPuertoServicio(string strServicio)
+        {
+            return await ObtenerPuertoServicio(strServicio);
+        }
+
+        /// <summary>
+        /// Funcion escucha puerto disponible
+        /// </summary>
+        /// <param name="intPuerto"></param>
+        /// <param name="strServicio"></param>
+        /// <param name="intPId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strDisplayName"></param>
+        /// <param name="funcProcesar"></param>
+        /// <param name="boolEnviarRespuesta"></param>
+        /// <returns></returns>
+        public async Task ProcesoEscuchaPuerto(int intPuerto, string strServicio, int? intPId, string strNombreProceso, string strDisplayName, Delegate funcProcesar, bool boolEnviarRespuesta)
+        {
+            await ProcesoEscuchaPuerto(intPuerto, strServicio, (int)intPId, strNombreProceso, strDisplayName, funcProcesar, boolEnviarRespuesta);
+        }
+
+        /// <summary>
+        /// Actualiza terminacion del proceso
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ProcesoActualizaTerminacion(string strNombreServicio, int? intgpId, string strNombreProceso)
+        {
+            try
+            {
+                await ActualizaTerminacion(strNombreServicio);
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Error al ejecutar consulta. +gpId:{intgpId}, proceso:{strNombreProceso}, Ex: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Captura si hubo un error en el proceso
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strNombreServico"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strAlias"></param>
+        /// <param name="strExepcion"></param>
+        /// <returns></returns>
+        public async Task EjecutaErrorProceso(string strFolio, string strNombreServico, string strNombreProceso, string strTipoOperacion, int? intgpId, string strAlias, Exception strExepcion)
+        {
+            await ActualizaErrorProceso(new ProcesoDTO
+            {
+                Folio = strFolio,
+                TipoOperacion = strTipoOperacion,
+                Servicio = strNombreServico,
+                AliasProceso = strAlias,
+                PId = (int)intgpId,
+                NombreProceso = strNombreProceso,
+                Excepcion = strExepcion
+            });
+        }
+
+        /// <summary>
+        /// Actualiza folio maestro con estatus fecha futura o FC terminado del plan maestro
+        /// </summary>
+        /// <param name="strFolioMaestro"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strFechaTomi"></param>
+        /// <returns>int</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<int> ActualizaEstatusFechaFuturaPlanMaestroFolioMaestro(string strFolioMaestro, string strTipoOperacion, string strFechaTomi)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaPlanTrabajoMaestroEstatusFCMTerminadoFiltroEstatus, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@FolioMaestro", Convert.ToInt64(strFolioMaestro)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", (strTipoOperacion)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaTomi", (strFechaTomi)));
+                });
+
+            if (!objResultadoSp.Exito && objResultadoSp.FilasAfectadas < 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaEstatusFechaFuturaPlanMaestroFolioMaestro");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+            return objResultadoSp.FilasAfectadas;
+        }
+
+        /// <summary>
+        /// Actualiza estatus a fecha futura en plan maestro
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strFechaTomi"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaEstatusFechaFuturaPlanMaestro(string strFolio, string strTipoOperacion, string strFechaTomi)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaPlanTrabajoMaestroEstatusFCMTerminado, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", (strTipoOperacion)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@FechaTomi", (strFechaTomi)));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaEstatusFechaFuturaPlanMaestro");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+
+        /// <summary>
+        /// Inserta folio y tipo de operacion en tabla de Control devoluciones
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task InsertaFolioOpControlDevoluciones(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.SP_INSERTA_CONTROL_DEVOLUCIONES, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt32(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion",strTipoOperacion));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|InsertaFolioOpControlDevoluciones");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+
+        /// <summary>
+        /// Consulta estatus FCM
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>Parametros</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<Parametros> ConsultaEstatusFCM(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult<Parametros> objResultadoSp =
+                    await EjecutarStoredProcedureQuery<Parametros>(
+                EnumNombresProcedimientosAlmacenados.usp_ConsultaEstatusFcm, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                });
+
+            if (objResultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ConsultaEstatusFCM");
+                throw new Exception("Error al ejecutar consulta. No se encuentran registros");
+            }
+            return objResultadoSp.Data.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Actualiza estatus plan maestroa Hotscan
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaPlanMaestroEstatusHotscan(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaPlanTrabajoMaestroEstatusHotscan, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaPlanMaestroEstatusHotscan");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+
+        /// <summary>
+        /// Actualiza estatus plan detalle si es diferente el servicio de ActualizaEstatus
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaPlanDetalleDifActualizaEstatus(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaPlanTrabajoDetalleTerminadoSrvDifActualizaEstatus, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaPlanDetalleDifActualizaEstatus");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+
+        /// <summary>
+        /// Actualiza el estatus RECC en tabla de operacion
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strRazonRechazo"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaEstatusReccTablaOperacion(string strFolio, string strCampoTipoOperacion, string strTablaBase)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaTablaDinamicaEstatusRECC, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@CampoTipoOperacion", strCampoTipoOperacion));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TablaBase", strTablaBase));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaEstatusReccTablaOperacion");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+        /// <summary>
+        /// Actualiza plan maestro estatus Cancelado
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strRazonRechazo"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaEstatusCancelPlanMaestro(string strFolio, string strTipoOperacion, string strRazonRechazo)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaPlanTrabajoMaestroCanceladaFCM, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@AnalizadorRechazo", strRazonRechazo));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaEstatusCancelPlanMaestro");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+
+        /// <summary>
+        /// Actualiza plan detalle
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaPlanDetalle(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaPlanTrabajoDetalleTerminado, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaPlanDetalle");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+
+        /// <summary>
+        /// Actualiza estatus CANCEL tabla de intercambio FCM
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaEstatusCancelIntercambio(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaFcmIntercambioEstatusCancel, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaEstatusCancelIntercambio");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+
+        /// <summary>
+        /// Consulta estatus Sentinel intercambio
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="strProcAlmacenado"></param>
+        /// <returns>Parametros</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<Parametros> ConsultaEstatusSentinel(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult<Parametros> objResultadoSp =
+                await EjecutarStoredProcedureQuery<Parametros>(EnumNombresProcedimientosAlmacenados.usp_ConsultaEstatusSentinelIntercambio
+                , cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", strFolio));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                });
+
+            var operacion = objResultadoSp?.Data?.FirstOrDefault();
+
+            if (operacion == null) return new Parametros();
+            
+            return operacion;
+        }
+
+        /// <summary>
+        /// Consulta de operaciones H2H, GPH, ENT
+        /// parametro intTipoConsulta sirva para evaluar el contenido del select:
+        ///  1 = 'NF_ESTATUS'
+        ///  2 = 'NF_ESTATUS'
+        ///  3 = 'NF_ESTATUS, NF_FECHA_EJECUCION, NF_NOMBRE_ARCHIVO_GPH, NF_PMT_INF_ID, NF_ID_ARCHIVO'
+        ///  4 = 'NF_ESTATUS, NF_FECHA_EJECUCION, NF_NOMBRE_ARCHIVO_H2H'	
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <param name="strCampoFiltro"></param>
+        /// <returns>OperacionEntGphH2h</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<OperacionEntGphH2h> ConsultaOperacionEntGphH2h(string strFolio, string strTablaBase, string strCampoFiltro, int intTipoConsulta)
+        {
+            StoredProcedureResult<OperacionEntGphH2h> objResultadoSp =
+                await EjecutarStoredProcedureQuery<OperacionEntGphH2h>(
+                EnumNombresProcedimientosAlmacenados.usp_ConsultaOperacionEntGphH2h, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TablaBase", strTablaBase));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@CampoFiltro", strCampoFiltro));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoConsulta", intTipoConsulta));
+                });
+
+            var operacion = objResultadoSp?.Data?.FirstOrDefault();
+
+            return operacion?.NF_ESTATUS == null
+                ? null
+                : operacion;
+        }
+
+        /// <summary>
+        /// Actualiza estatus del folio maestro a Hotscan
+        /// </summary>
+        /// <param name="strFolioMaestro"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>int</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<int> ActualizaEstatusFolioMaestroHotScan(string strFolioMaestro, string strTipoOperacion)
+        {
+            StoredProcedureResult objResultadoSp =
+                await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaFolioMaestroEstatusHotscan, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@FolioMaestro", Convert.ToInt64(strFolioMaestro)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                });
+
+            if (!objResultadoSp.Exito && objResultadoSp.FilasAfectadas == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaEstatusFolioMaestroHotScan");
+                throw new Exception("Error al ejecutar actualizacion estatus hotscan, tabla maestro.");
+            }
+            return objResultadoSp.FilasAfectadas;
+        }
+
+        /// <summary>
+        /// Proceso para obtener el folio maestro
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>string</returns>
+        public async Task<string> ProcesoObtenerFolioMaestro(string strFolio, string strTipoOperacion)
+        {
+            return await ObtenerFolioMaestro(strFolio, strTipoOperacion);
+        }
+
+        /// <summary>
+        /// Actualiza estatus inicio hotscan
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaEstatusInicioHotScan(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult objResultadoSp =
+                await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaEstatusHotscanInicio, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaEstatusInicioHotScan");
+                throw new Exception("Error al ejecutar proceso actualizacion estatus hotscan, tabla maestro.");
+            }
+        }
+
+        /// <summary>
+        /// Fin estatus del proceso
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strNombreServico"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strAlias"></param>
+        /// <returns></returns>
+        public async Task EjecutaTerminoProceso(string strFolio, string strNombreServico, string strNombreProceso, string strTipoOperacion, int? intgpId, string strAlias)
+        {
+            await TerminaProceso(new ProcesoDTO
+            {
+                Folio = strFolio,
+                TipoOperacion = strTipoOperacion,
+                Servicio = strNombreServico,
+                AliasProceso = strAlias,
+                PId = (int)intgpId,
+                NombreProceso = strNombreProceso,
+                Excepcion  = new Exception("null")
+            });
+        }
+
+        /// <summary>
+        /// Inicio del proceso
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strNombreServico"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strAlias"></param>
+        /// <returns></returns>
+        public async Task EjecutaInicioProceso(string strFolio, string strNombreServico, string strNombreProceso,
+            string strTipoOperacion, int? intgpId, string strAlias)
+        {
+            await IniciaProceso(new ProcesoDTO
+            {
+                Folio = strFolio,
+                TipoOperacion = strTipoOperacion,
+                Servicio = strNombreServico,
+                AliasProceso = strAlias,
+                PId = (int)intgpId,
+                NombreProceso = strNombreProceso
+            });
+        }
+
+
+        /// <summary>
+        /// Obtiene alias del proceso
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strNombreServico"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>string</returns>
+        public async Task<string> ObtieneUltimoProceso(string strFolio, string strNombreServico, string strTipoOperacion)
+        {
+            string salida = string.Empty;
+
+            try
+            {
+                salida = await ObtenerUltimoProceso(new ProcesoDTO()
+                {
+                    Folio = strFolio,
+                    TipoOperacion = strTipoOperacion,
+                    Servicio = strNombreServico
+                });
+            }
+            catch (Exception ex)
+            {
+                salida = ex.Message;
+            }
+            return salida;
+        }
+
+        /// <summary>
+        /// Actualiza ejecucion del servicio INICIO
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ProcesoActualizaEjecucion(string strNombreServicio, int? intgpId, string strNombreProceso)
+        {
+            try
+            {
+                await ActualizaEJecucion(strNombreServicio);
+            }
+            catch (Exception ex)
+            {
+                string strMsjError = $"Error al ejecutar consulta. +gpId:{intgpId}, proceso:{strNombreProceso}, Ex: {ex}";
+                Config.EscribirLog(strMsjError, strNombreServicio);
+                throw new Exception(strMsjError);
+            }
+        }
+
+        /// <summary>
+        /// Actualiza tabla de control ENT_SPEI
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>true/false</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task ActualizaControlDevolucion(long strFolio, string strTipoOperacion)
+        {
+            Config.EscribirLog("INFO|Devoluciones|Actualizando en tabla de control,la hora de devolucion SPEI- Entrada." +
+                strFolio.ToString() + "|" + strTipoOperacion, NombreServicio.HotScan.ToString());
+            StoredProcedureResult objResultadoSp =
+                await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaCtrlDevolucionesHitFechaDev, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt32(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaControlDevolucion");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+        }
+
+        /// <summary>
+        /// Llena proceso
+        /// </summary>
+        /// <returns>Proceso</returns>
+        public async Task<Proceso> DatosProceso()
+        {
+            Proceso procesoDTO = new Proceso();
+            try
+            {
+
+                Process proceso = Process.GetCurrentProcess();
+
+                procesoDTO.ProcesoId = proceso.Id;
+                procesoDTO.NombreProceso = proceso.ProcessName;
+                procesoDTO.DisplayName = await ObtieneDisplayName(proceso.Id);
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("Error en obtener proceso: " + ex.Message, NombreServicio.HotScan.ToString());
+            }
+
+            return procesoDTO;
+        }
+
+        /// <summary>
+        /// Obtiene los parametros de HotScan
+        /// </summary>
+        /// <returns>Dictionary<string, string></returns>
+        public async Task<Dictionary<string, string>> ObtenerParametrosHotScan()
+        {
+            List<Parametros> resultadoSp = (await EjecutarStoredProcedureQuery<Parametros>(EnumNombresProcedimientosAlmacenados.usp_ConsultaParametrosHotScan)).Data;
+
+            if (resultadoSp.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ObtenerParametrosHotScan");
+                throw new Exception("Error al consultar. No se encuentran registros");
+            }
+
+            return resultadoSp
+                .Where(x => x != null && !string.IsNullOrWhiteSpace(x.Cve_parametro))
+                .GroupBy(x => x.Cve_parametro)
+                .ToDictionary(
+                    x => x.Key,
+                    x => x.LastOrDefault()?.Cve_valor ?? string.Empty
+                );
+
+        }
+
+        /// <summary>
+        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones
+        /// </summary>
+        /// <returns>Dictionary<string, string></returns>
+        public async Task<Dictionary<string, string>> ObtenerParametrosSistema()
+        {
+            var resultadoSp = await EjecutarStoredProcedureQuery<Parametros>(EnumNombresProcedimientosAlmacenados.usp_ConsultaParametrosSistema);
+            var datos = resultadoSp.Data;
+            if (datos.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ObtenerParametrosSistema");
+                throw new Exception("Error: no se encontraron datos. No se encuentran registros");
+            }
+
+            Dictionary<string, string> diccParametros = new Dictionary<string, string>();
+            foreach (Parametros parametro in datos)
+            {
+                if (diccParametros.ContainsKey(parametro.Id_parametro))
+                {
+                    Config.EscribirLog($"{ConstantesClaveAviso.Error}|obtenerParametrosSistema|El parámetro '{parametro.Id_parametro}' está duplicado en la base de datos.");
+                    continue;
+                }
+
+                diccParametros.Add(parametro.Id_parametro, parametro.Valor);
+            }
+            return diccParametros;
+        }
+
+        /// <summary>
+        /// Obtiene fecha de ejecucion
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>Parametros</returns>
+        public async Task<Parametros> ObtenerFechaEjecucion(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult<Parametros> resultadoSp = await EjecutarStoredProcedureQuery<Parametros>(
+                EnumNombresProcedimientosAlmacenados.usp_ConsultaFechaEjecucion, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", strTipoOperacion));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", strFolio));
+            });
+            if (resultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ObtenerFechaEjecucion");
+                throw new Exception("Error: no se recupero fecha de ejecucion");
+            }
+            return resultadoSp.Data.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Obtiene las fechas del sistema.
+        /// </summary>
+        /// <returns>string</returns>
+        public async Task<string> ObtenerFechaSistema()
+        {
+            StoredProcedureResult<Parametros> strFecha = await EjecutarStoredProcedureQuery<Parametros>(
+                EnumNombresProcedimientosAlmacenados.usp_ConsultaFechaSistema, cmd =>
+            {
+            });
+
+            if (strFecha?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ObtenerFechaSistema");
+                string strMsjError = $"Error: no se recupero fecha del sistema.";
+                Config.EscribirLog(strMsjError, NombreServicio.HotScan.ToString());
+                throw new Exception(strMsjError);
+            }
+
+            string strFechaFormateada = strFecha.Data.FirstOrDefault().Fecha.ToString(EnumParametrosGenerales.FECHA_BD);
+            return strFechaFormateada;
+        }
+
+
+        /// <summary>
+        /// Obtener control de escaneo Hotscan
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns>List<ControlEscaneoHotScan></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<List<ControlEscaneoHotScan>> ObtenerControlEscaneoHotScan(string strFolio, string strTipoOperacion)
+        {
+            StoredProcedureResult<ControlEscaneoHotScan> objResultadoSp = await EjecutarStoredProcedureQuery<ControlEscaneoHotScan>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaControlEscaneoHotscan, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Tipo_Operacion", strTipoOperacion));
+            });
+
+            if(objResultadoSp == null)
+            {
+                return new List<ControlEscaneoHotScan>();
+            }
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR|ObtenerControlEscaneoHotScan| No se pudo obtener control Hotscan para folio: {strFolio}, tipo operacion: {strTipoOperacion}");
+                return new List<ControlEscaneoHotScan>();
+            }     
+
+            return objResultadoSp.Data ?? new List<ControlEscaneoHotScan>();
+        }
+
+        /// <summary>
+        /// Analisis escaneo de folio
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTipoOperacion"></param>
+        /// <param name="bBanderaAnalizador"></param>
+        /// <returns>true/false</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<bool> ValidaControlEscaneoHotScan(string strFolio, string strTipoOperacion, string bBanderaAnalizador)
+        {
+            StoredProcedureResult objResultadoSp = await EjecutarStoredProceduredNonQuery(
+            EnumNombresProcedimientosAlmacenados.usp_InsertaControlEscaneo, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", strFolio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Tipo_Operacion", strTipoOperacion));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Flg_analizador", bBanderaAnalizador));
+            });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ValidaControlEscaneoHotScan");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Exito;
+        }
+
+        /// <summary>
+        /// Actualiza plan de trabajo maestro
+        /// </summary>
+        /// <param name="planTrabajoMaestroDto"></param>
+        /// <returns>true/false</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<bool> ActualizaPlanTrabajoMaestro(PlanTrabajoMaestroDto planTrabajoMaestroDto)
+        {
+            StoredProcedureResult objResultadoSp = await EjecutarStoredProceduredNonQuery(
+            EnumNombresProcedimientosAlmacenados.usp_ActualizaPlanTrabajoMaestro, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pvCveEstatusNew", planTrabajoMaestroDto.NuevoEstatus));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pvFolio", planTrabajoMaestroDto.Folio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pvFolioMaestro", planTrabajoMaestroDto.FolioMaestro));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pvTipoOperacion", planTrabajoMaestroDto.TipoOperacion));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pvCveEstatus", planTrabajoMaestroDto.EstatusFiltro));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@piNumEstatusEspecial", planTrabajoMaestroDto.NumeroEstatusEspcial));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pvErrDescripcion", planTrabajoMaestroDto.DescripcionError));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pdFecValor", planTrabajoMaestroDto.FechaValor));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pbFlagTerminado", planTrabajoMaestroDto.BanderaTerminado));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pbFlagCancelada", planTrabajoMaestroDto.BanderaCancelado));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@piTipoUpdate", planTrabajoMaestroDto.TipoActualizacion));
+            });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaPlanTrabajoMaestro");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Exito;
+        }
+
+        /// <summary>
+        /// Obtiene la lista de configuracion de Hotscan
+        /// </summary>
+        /// <param name="strLlave"></param>
+        /// <returns>List<ConfiguracionGeneral></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<List<ConfiguracionGeneral>> ObtenerConfiguracionGeneralHotScan(string strLlave = null)
+        {
+            StoredProcedureResult<ConfiguracionGeneral> objResultadoSp =
+                await EjecutarStoredProcedureQuery<ConfiguracionGeneral>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaConfiguracionGeneralHotscan, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@pvLlave", strLlave));
+            });
+
+            if (objResultadoSp == null)
+            {
+                return new List<ConfiguracionGeneral>();
+            }
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR|ObtenerConfiguracionGeneralHotScan| No se pudo obtener Configuracion general de HOTSCAN");
+                return new List<ConfiguracionGeneral>();
+            }
+
+            return objResultadoSp.Data ?? new List<ConfiguracionGeneral>();
+
+            
+        }
+
+        /// <summary>
+        /// Obtiene la lista de configuracion del analizador de Hotscan 
+        /// </summary>
+        /// <param name="strLlave"></param>
+        /// <returns>List<ConfiguracionAnalizadorConector></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<List<ConfiguracionAnalizadorConector>> ObtenerConfiguracionAnalizadorHotScan()
+        {
+            StoredProcedureResult<ConfiguracionAnalizadorConector> objResultadoSp =
+                await EjecutarStoredProcedureQuery<ConfiguracionAnalizadorConector>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaConfiguracionAnalizadores);
+
+            if (objResultadoSp == null)
+            {
+                return new List<ConfiguracionAnalizadorConector>();
+            }
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR|ObtenerConfiguracionAnalizadorHotScan| No se pudo obtener Configuracion analizador de HOTSCAN");
+                return new List<ConfiguracionAnalizadorConector>();
+            }
+
+            return objResultadoSp.Data ?? new List<ConfiguracionAnalizadorConector>();
+
+        }
+
+        /// <summary>
+        /// Desactivacion automatica de analizador Hotscan
+        /// </summary>
+        /// <param name="intId"></param>
+        /// <returns>true/false</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<bool> DesactivaAnalizadorHotScan(int intId)
+        {
+            StoredProcedureResult objResultadoSp =
+                await EjecutarStoredProcedureQuery<object>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaConfiguracionAnalizadores, cmd =>
+            {
+                //cmd.Parameters.Add(basedatosConexion.CrearParametro("@Id", intId));
+            });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|DesactivaAnalizadorHotScan");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Exito;
+        }
+
+        /// <summary>
+        /// Reactivacion automatica de analizador Hotscan
+        /// </summary>
+        /// <param name="intId"></param>
+        /// <returns>true/false</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<bool> ActivaAnalizadorHotScan(int intId)
+        {
+            StoredProcedureResult objResultadoSp =
+                await EjecutarStoredProcedureQuery<object>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaConfiguracionAnalizadores, cmd =>
+            {
+                //cmd.Parameters.Add(basedatosConexion.CrearParametro("@Id", intId));
+            });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActivaAnalizadorHotScan");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Exito;
+        }
+
+
+        #region CONSULTAS LOGICA UTC
+
+        /// <summary>
+        /// Valida si el folio es banco
+        /// </summary>
+        /// <param name="intId"></param>
+        /// <returns>int</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<Parametros> ValidacionExisteFolio(string strFolio)
+        {
+            StoredProcedureResult<Parametros> objResultadoSp =
+                await EjecutarStoredProcedureQuery<Parametros>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaRegistrosSwiftIn, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+            });
+
+            if (objResultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ValidacionExisteFolio");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Data.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Obtiene codigo de cliente tabla FXD_Local
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns>ClienteFxdLocal</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<ClienteFxdLocal> ConsultaCodigoClienteFxdLocal(string strFolio)
+        {
+            StoredProcedureResult<ClienteFxdLocal> objResultadoSp =
+                await EjecutarStoredProcedureQuery<ClienteFxdLocal>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaDatosCargoFXDLocal, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+            });
+
+            if (objResultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ConsultaCodigoClienteFxdLocal");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Data.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Obtiene el sector del cliente
+        /// </summary>
+        /// <param name="strCodigoCliente"></param>
+        /// <returns>Parametros</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<Parametros> ValidaEsbancoVistaT24(string strCodigoCliente)
+        {
+            StoredProcedureResult<Parametros> objResultadoSp =
+                await EjecutarStoredProcedureQuery<Parametros>(
+            EnumNombresProcedimientosAlmacenados.usp_ValidaClienteBanco, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@CodigoCliente", strCodigoCliente));
+            }, esVistasT24: true);
+
+            if (objResultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ValidaEsbancoVistaT24");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Data.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Obtiene cargo FXI del folio
+        /// </summary>
+        /// <param name="strCodigoCliente"></param>
+        /// <returns>Parametros</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<Parametros> ObtieneCargoFxi(string strFolio)
+        {
+            StoredProcedureResult<Parametros> objResultadoSp =
+                await EjecutarStoredProcedureQuery<Parametros>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaCargoFXI, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+            });
+
+            if (objResultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ObtieneCargoFxi");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Data.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Obtiene el motivo de devolucion Entidad TEF
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns>Parametros</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<Parametros> ObtieneMotivoDevolucionEntTef(string strFolio)
+        {
+            StoredProcedureResult<Parametros> objResultadoSp =
+                await EjecutarStoredProcedureQuery<Parametros>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaMotivoDevolucionTEF, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+            });
+
+            if (objResultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ObtieneMotivoDevolucionEntTef");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Data.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Consulta tipo de transaccion de la operacion
+        /// </summary>
+        /// <param name="strTipoOperacion"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<Parametros> ObtieneTipoTransaccionTrx(string strTipoOperacion, string strSubOperacion)
+        {
+            StoredProcedureResult<Parametros> objResultadoSp =
+                await EjecutarStoredProcedureQuery<Parametros>(
+            EnumNombresProcedimientosAlmacenados.usp_ConsultaT24TrxTypeEsquema, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strTipoOperacion));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@SubOperacion", strSubOperacion));
+            });
+
+            if (objResultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ObtieneTipoTransaccionTrx");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Data.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Consulta datos para inspeccion de operaciones dinamicamente
+        /// parametro intTipoConsulta sirve para evaluar el contenido del select:
+        ///  1 = 'NF_ESTATUS, T24_DEBIT_AMOUNT,NF_TIPO,T24_DEBIT_CURRENCY,NF_FOLIO,NF_FOLIO_UNICO,T24_BEN_CUST_NAME,T24_COMPANY_NAME,NF_FECHA_EJECUCION,ISNULL(T24_DEBIT_THEIR_REF,'''') AS T24_DEBIT_THEIR_REF'
+		///  2 = 'NF_ESTATUS, T24_AMOUNT as T24_DEBIT_AMOUNT,NF_TIPO,T24_CURRENCY as T24_DEBIT_CURRENCY,NF_FOLIO,NF_FOLIO_UNICO,T24_BEN_CUST_NAME,T24_COMPANY_NAME,NF_FECHA_EJECUCION,ISNULL(T24_CONCEPT,'''') AS T24_DEBIT_THEIR_REF'
+		///  3 = 'NF_ESTATUS, T24_DEBIT_AMOUNT,''ESD'' as NF_TIPO,T24_DEBIT_CURRENCY,NF_FOLIO,NF_FOLIO_UNICO,RTRIM(LTRIM(ISNULL(op_nom_ben,'''')+'' ''+ISNULL(op_nom_ben2,''''))) AS T24_BEN_CUST_NAME, ISNULL(op_nom_ord,NF_BANCO_BENEF) as T24_COMPANY_NAME,NF_FECHA_EJECUCION,ISNULL(OP_CONCEPTO_PAG2,'''') AS T24_DEBIT_THEIR_REF,  ISNULL(cd_clave,0) AS MotivoDevolucion'
+		///  4 = 'NF_ESTATUS, T24_DEBIT_AMOUNT,''ETF'' as NF_TIPO,T24_DEBIT_CURRENCY,NF_FOLIO,NF_FOLIO_UNICO,NombreOrdenante AS T24_BEN_CUST_NAME,T24_COMPANY_NAME,NF_FECHA_EJECUCION,T24_PAYMENT_DETAILS AS T24_DEBIT_THEIR_REF, MotivoDevolucion'
+		///  5 = 'NF_ESTATUS, T24_DEBIT_AMOUNT,''ESP'' as NF_TIPO,T24_DEBIT_CURRENCY,op_clave as NF_FOLIO,NF_FOLIO_UNICO,RTRIM(LTRIM(ISNULL(op_nom_ben,'''')+'' ''+ISNULL(op_nom_ben2,''''))) AS T24_BEN_CUST_NAME,ISNULL(op_nom_ord,NF_BANCO_BENEF) as T24_COMPANY_NAME,NF_FECHA_EJECUCION,ISNULL(OP_CONCEPTO_PAG2,'''') AS T24_DEBIT_THEIR_REF, ISNULL(cd_clave,0) AS MotivoDevolucion'	
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <param name="strCampoFiltro"></param>
+        /// <param name="intTipoConculta"></param>
+        /// <returns>TablaBaseOperacionGrupo</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<TablaBaseOperacionGrupo> EjecutaProcedimientoDinamico(string strFolio, string strTablaBase, string strCampoFiltro, int intTipoConculta, string strProcAlmacenado)
+        {
+            try
+            {
+                StoredProcedureResult<TablaBaseOperacionGrupo> objResultadoSp =
+                    await EjecutarStoredProcedureQuery<TablaBaseOperacionGrupo>(
+                strProcAlmacenado, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", strFolio));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TablaBase", strTablaBase));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@CampoFiltro", strCampoFiltro));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoConsulta", intTipoConculta));
+                });
+
+                if (objResultadoSp?.Data?.Count == 0)
+                {
+                    Config.EscribirLog($"ERROR al ejecutar consulta|EjecutaProcedimientoDinamico");
+                    throw new Exception("Error al ejecutar consulta.");
+                }
+
+                return objResultadoSp.Data.FirstOrDefault();
+
+            }catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|EjecutaProcedimientoDinamico|Se presenta exception: " + ex.ToString());
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Actualiza folio con nuevo estatus
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strTablaBase"></param>
+        /// <param name="strNuevoEstatus"></param>
+        /// <returns>true/false</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<bool> ActualizaNuevoEstatus(string strFolio, string strTablaBase, string strNuevoEstatus, string strCampoFolio)
+        {
+            StoredProcedureResult objResultadoSp =
+                await EjecutarStoredProceduredNonQuery(
+            EnumNombresProcedimientosAlmacenados.usp_ActualizaNuevoEstatus, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@TablaBase", strTablaBase));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@NuevoEstatus", strNuevoEstatus));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@CampoFiltro", strCampoFolio));
+            });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaNuevoEstatus");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Exito;
+        }
+
+        /// <summary>
+        /// Inserta alertas
+        /// </summary>
+        /// <param name="alerta"></param>
+        /// <returns></returns>
+        public async Task InsertaAlerta(AlertaDTO alerta) => await _alertas.InsertarAlerta(alerta);
+
+        #endregion CONSULTAS LOGICA UTC
+
+        #region CONSULTAS LOGICA FCM
+
+        /// <summary>
+        /// Actualiza cancelacion de folio por estatus RECC
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strFolioUnico"></param>
+        /// <returns>true/false</returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<bool> ActualizaCancelacionOperacionFcm(string strFolio, string strFolioUnico)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_ActualizaCancelaOperacionCliente, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@Folio", Convert.ToInt64(strFolio)));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@TipoOperacion", strFolio));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@FolioUnico", strFolioUnico));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ActualizaCancelacionOperacionFcm");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Exito;
+        }
+
+        /// <summary>
+        /// Inserta registro en tabla de intercambio
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="strFolioUnico"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<StoredProcedureResult> InsertaFolioTablaIntercambio(string strFolio, string strTipoOperacion, string strSolicitudXml)
+        {
+            StoredProcedureResult objResultadoSp =
+                    await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.usp_InsertaFormatoFCM, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@nf_folio", strFolio));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipo_operacion", strTipoOperacion));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@msg_in", strSolicitudXml));
+                });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|InsertaFolioTablaIntercambio");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp;
+        }
+        #endregion CONSULTAS LOGICA FCM
+    }
+}
+**********************
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos.Spei;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Servicio
+{
+    /// <summary>
+    /// Repositorio SPEI1
+    /// </summary>
+    public class RepositorioSpeiUno : RepositorioMaestro, IRepositorioSpeiUno
+    {
+        public RepositorioSpeiUno() 
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.SPEI1, null, null)
+        {
+        }
+
+        /// <summary>
+        /// Consulta datos de devolucion ENT_SPEI
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns>List<DevolucionEntSpei></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<List<DevolucionEntSpei>> ObtenerDatosDevolucion(long strFolio)
+        {
+            StoredProcedureResult<DevolucionEntSpei> objResultadoSp = 
+                await EjecutarStoredProcedureQuery<DevolucionEntSpei>(
+                EnumNombresProcedimientosAlmacenados.ConsultaDatosDevolucionesInterfaceTOMI, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@op_clave", strFolio)); //18,0
+            });
+
+            if (!objResultadoSp.Exito || objResultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ObtenerDatosDevolucion");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Data;
+        }
+        
+        /// <summary>
+        /// Inserta firma digital
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="intCodigoDevolucion"></param>
+        /// <param name="strFirmaDigital"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task InsertaFirmaDigitalDevolucion(long strFolio, int intCodigoDevolucion,string strFirmaDigital)
+        {
+            StoredProcedureResult objResultadoSp = 
+                await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.sp_InsertaFirmaDigitalDevolucion_InterfaceTOMI_SPEI1, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@op_clave", strFolio));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@cd_clave", intCodigoDevolucion));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@op_firma_dig", strFirmaDigital, 1000));
+            });
+
+            if (!objResultadoSp.Exito)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|InsertaFirmaDigitalDevolucion");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            Config.EscribirLog("INFO|Devoluciones|StoreProcedure ejecutado correctamente, entrada spei devuelta.", NombreServicio.HotScan.ToString());
+        }
+    }
+}
+*********************
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos.Spei;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Servicio
+{
+    /// <summary>
+    /// Repositorio SPEI2
+    /// </summary>
+    public class RepositorioSpeiDos : RepositorioMaestro, IRepositorioSpeiDos
+    {
+        //Cambiar : NombreBasedatos.SPEI2
+        public RepositorioSpeiDos()
+            : base(BasedatosProveedor.SqlServer, NombreBasedatos.SPEI2, null, null)
+        {
+        }
+
+        /// <summary>
+        /// Consulta datos de devolucion ENT_SPEI_2
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns>List<DevolucionEntSpei></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task<List<DevolucionEntSpei>> ObtenerDatosDevolucion(long strFolio)
+        {
+            StoredProcedureResult<DevolucionEntSpei> objResultadoSp =
+                await EjecutarStoredProcedureQuery<DevolucionEntSpei>(
+                EnumNombresProcedimientosAlmacenados.ConsultaDatosDevolucionesInterfaceTOMI, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@op_clave", strFolio)); //18,0
+                });
+
+            if (!objResultadoSp.Exito || objResultadoSp?.Data?.Count == 0)
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|ObtenerDatosDevolucion");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            return objResultadoSp.Data;
+        }
+
+        /// <summary>
+        /// Inserta firma digital
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <param name="intCodigoDevolucion"></param>
+        /// <param name="strFirmaDigital"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public async Task InsertaFirmaDigitalDevolucionSpeiDos(long strFolio, int intCodigoDevolucion, string strFirmaDigital)
+        {
+            StoredProcedureResult objResultadoSp =
+                await EjecutarStoredProceduredNonQuery(
+                EnumNombresProcedimientosAlmacenados.sp_InsertaFirmaDigitalDevolucion_InterfaceTOMI_SPEI2, cmd =>
+                {
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@op_clave", strFolio));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@cd_clave", intCodigoDevolucion));
+                    cmd.Parameters.Add(basedatosConexion.CrearParametro("@op_firma_dig", strFirmaDigital, 1000));
+                });
+
+            if (!objResultadoSp.Exito) 
+            {
+                Config.EscribirLog($"ERROR al ejecutar consulta|InsertaFirmaDigitalDevolucionSpeiDos");
+                throw new Exception("Error al ejecutar consulta.");
+            }
+
+            Config.EscribirLog("INFO|Devoluciones|StoreProcedure ejecutado correctamente, entrada spei devuelta.", NombreServicio.HotScan.ToString());
+        }
+    }
+}
