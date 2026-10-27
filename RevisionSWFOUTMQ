@@ -1,0 +1,390 @@
+SwfOUTMQ Recommendations
+SwfOUTMQ - Architecture & Code Quality Recommendations
+Solution: SwfOUTMQ.slnx (../../SWIFT/Outgoing/SWF_OUT_MQ/SwfOUTMQ.slnx). Reviewed: 2026-10-15, branch CodeReview, commit 89db348138bdc8bafaf88dded9ea6a5d2c2a72b8 (clean tree). Compared against: LoansApp coding-practices baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review/severity checklist (../BaseLine_Docs/code_review.md). See also: orchestration/control (./_ORCHESTRATION.md#swfoutmq-scoped-audit-checkpoint---2026-10-15). Target: .NET Framework 4.8 Windows Service (IBM MQ publisher); focus: all categories; severity threshold: all. Audit only: no application fixes applied.
+1. Solution Overview (low/no-dependency -> high dependency)
+Tier	Project	Kind	Path
+0	AplicacionSwfOUTMQ	Class library (tick workflow, constants, models)	AplicacionSwfOUTMQ.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/AplicacionSwfOUTMQ.csproj)
+1	InfraestructuraSwfOUTMQ	Class library (TOMI repository + IBM MQ publisher + e-mail)	InfraestructuraSwfOUTMQ.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/InfraestructuraSwfOUTMQ.csproj)
+2	PruebasUnitarias	MSTest library (3 test methods)	PruebasUnitarias.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ/PruebasUnitarias/PruebasUnitarias.csproj)
+2	SwfOUTMQ	Windows Service executable (composition root)	SwfOUTMQ.csproj (../../SWIFT/Outgoing/SWF_OUT_MQ/SwfOUTMQ/SwfOUTMQ.csproj)
+
+What this solution actually does: it is the last hop of the SWIFT *outgoing* chain. Every timer tick (interval from the external service configuration, 10 s fallback) it re-reads 14 parameters from TOMI (operating window, the SWF_OUT_GET_MT_BATCH flag, the alert address and ten MQ.SWF_OUT.* connection settings), reads every SWIFT message that an upstream service left in status INI (usp_ObtenerOperacionesSWFOutMq), and, when sending is allowed (always in "batch" mode, otherwise only on a business day inside HORA_OP_INICIO-HORA_OP_FIN), opens one TLS connection to IBM MQ and publishes each message text to the configured queue. For each message it first sets the TOMI control row to SNDNG, then performs the MQ put, then calls a procedure that sets PROC on three tables; a message-level MQ error sets ERROR. Failures are logged; unexpected exceptions raise an e-mail or a critical alert row; the tick always finishes by marking the service terminated. It carries outgoing payment-related SWIFT messages, so the findings below concern *delivered, delayed, lost or silently stuck* messages rather than style.
+1.1 Issue Summary
+Recommended priority	Count	Simple meaning
+Blocker	2	Close before approving a release: the status procedure the code calls is not defined by the SQL project; the solution cannot be built reproducibly
+Major	13	Correct or explicitly accept before relying on the service; planned reliability work
+Minor	7	Maintainability/cleanup after correctness work
+Total distinct findings	22	One category per finding; no duplicate tickets
+
+Skill category	Count
+MustChange/rewrite	7
+rewrite_recommended	11
+NiceToRewrite_ifTimePermits	4
+
+Priorities are source-review release recommendations, not CVSS or proof of a production incident. No credential-logging, cryptography, SQL-injection, sync-over-async or throw ex; defect was found in the authored code (see 2.1). The most important point: the message hand-off protocol (`INI` -> `SNDNG` -> `PROC`/`ERROR`) has no recovery path. Several ordinary failures (a missing procedure, an MQ outage mid-batch, a stop or crash between two statements, a failed final update) leave rows in a state that is never selected again and that nothing reports (SOM-I1, I3, I4, I5).
+2. Scope & Methodology Note
+Area	Evidence / limitation
+Source scope	26/26 tracked files, 2,275/2,275 physical lines fully read, not sampled: 16 C# files (1,429 lines), four project files, one .slnx, two packages.config, App.config, .gitignore (363 lines, read as rule list), .gitattributes
+Coverage record	SHA-256 / physical-line manifest (./_SwfOUTMQ_FileManifest.csv); every file has Reviewed range 1-N. The solution is below the large-project threshold (150 files / 5,000 lines), so no multi-turn progress tracker was needed
+Context also read	The three SQL objects for this solution under StoredProcedures\MWD_DB\DBMDW\SWIFT\Outgoing\SWF_OUT_MQ (and the DBMDW.sqlproj entries), and the relevant parts of shared MUFG_T24 source (WindowsServiceHostBase, RepositorioMaestro.EjecutarReader/EjecutarStoredProceduredNonQuery/ActualizaTerminacion, Parametrizacion, Configuracion, IControlServicio, IParametrizacion). Shared-library defects are out of scope; they are used only to confirm or rule out local findings. The SWF_OUT_MQ_GCMS twin was diffed for duplication only (its own review is pending)
+Exclusions	Git internals; no packages, bin/obj or IDE caches are tracked
+Review basis	Full current-source audit, not a changed-lines PR verdict or acceptance review for an unspecified work item
+Standards limitation	The baseline has blank inventory/evidence fields; its principles are criteria, not measured facts
+Build	Not built. D:\ServiceCMS does not exist on this machine (so MUFG_T24.dll / amqmdnet.dll are unavailable) and msbuild/dotnet are not on PATH
+Tests	Three [TestMethod]s exist (3 Assert calls). They were reviewed, not executed; by reading they cannot pass (SOM-T1). No coverage measured
+External evidence not used	No deployed configuration, live TOMI database or MQ manager, no deployed DLL versions, no secrets accessed; no package restore. SLAs, volume, queue consumer contract and operating-window policy are unknown
+Fix examples	Illustrative contracts, not compiled patches. New helper types need implementation, DI registration and regression tests. SQL examples use column names that do not exist today where noted
+
+Full-read batches (single session, 2026-10-15):
+Batch	Contents	Files	Physical lines	Status
+A	AplicacionSwfOUTMQ: OperacionServicio, ConstantesServicio, 2 interfaces, 2 models, csproj, AssemblyInfo	8	567	Full read complete
+B	InfraestructuraSwfOUTMQ: RepositorioTomi, MQErrorHandler, csproj, AssemblyInfo	4	612	Full read complete
+C	Host: ServicHost (+Designer), Program, App.config, packages.config, csproj, AssemblyInfo	7	392	Full read complete
+D	Tests: SwfOUTMQTest, csproj, packages.config, AssemblyInfo	4	260	Full read complete
+E	Root: .slnx, .gitignore, .gitattributes	3	444	Full read complete
+Total	Entire tracked scope	26	2,275	No pending range
+
+2.1 Quantified Cross-Checks and Duplication
+Check	Count	Meaning
+Absolute D:\ServiceCMS\... HintPath references	5	MUFG_T24.dll x4 (all projects), amqmdnet.dll x1 (SOM-B1, GEN-1)
+[TestMethod] / Assert. / [TestInitialize]	3 / 3 / 2	None can pass or run as written (SOM-T1)
+ConstantesServicio constants / never referenced	75 / 10	Dead and mislabeled constants (SOM-A6); MaxSpTimeout would have bounded the SQL calls (SOM-I2)
+catch blocks in first-party code	16	4 throw;, 1 throw new Exception( (RepositorioTomi.cs:244), 0 throw ex;
+Private LogInfo/LogWarning/LogError helper definitions	5	Three copies in RepositorioTomi, two in OperacionServicio; 15 direct Config.EscribirLog calls (static logger; SOM-I8/I9)
+Non-blank line overlap with the SWF_OUT_MQ_GCMS twin	93 % / 86 % / 81 % / 68 % / 67 %	ServiceHost / MQErrorHandler / RepositorioTomi / ConstantesServicio / OperacionServicio (SOM-D1, GEN-4); tests only 34 %
+.Result, .Wait(, GetAwaiter().GetResult()	0	No sync-over-async in authored code
+throw ex;, MD5/SHA1/DES/ECB, System.Random, secrets or message bodies in logs	0	Not present; only message *length* is logged
+.Pid.Value	2	ServicHost.cs:103, OperacionServicio.cs:241 - both run after the shared ObtenerProcesoActualAsync has assigned the PID (GEN-8 ruled out)
+DateTime.Now/UtcNow in first-party code	0	Time comes from the injected IParametrizacion (good)
+
+Scans supplement, not replace, the full read: every file above was read line by line.
+3. What's Already Good
+• Layering and DI. Application/Infrastructure/host split with interfaces IOperacionServicio and IRepositorioTomi<T>, constructor injection (OperacionServicio.cs:33-44 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L33)),
+SimpleInjector with Verify() (ServicHost.cs:87 (../../SWIFT/Outgoing/SWF_OUT_MQ/SwfOUTMQ/ServicHost.cs#L87)) and a per-scope configuration clone (line 81), matching the baseline's DI/Repository intent.
+• No secrets or payloads in first-party logs. The MQ password lives only in ConfiguracionMQ and the connection Hashtable (RepositorioTomi.cs:129,171 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L129));
+the four sensitive parameter keys are declared in a separate "sensitive" list (ConstantesServicio.cs:10 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/Enums/ConstantesServicio.cs#L10)) so the shared reader masks them; only MessageLength/StringLength of the SWIFT text is logged (line 226).
+• TLS is mandatory by construction. Cipher spec, key repository and certificate label are *required* parameters, so the service cannot silently fall back to an unencrypted channel.
+• Resource cleanup. Queue Close() and Disconnect() each have their own guarded try/catch in a finally (RepositorioTomi.cs:96-114 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L96)), so a failing close cannot hide the original error or skip the disconnect.
+• Exception hygiene. throw; (never throw ex;) in both update methods (lines 379, 411); the failure text carries folio and status.
+• Parameterized SQL only, no string-built statements; stored procedures are the only DB surface.
+• State finalization is in a `finally` (OperacionServicio.cs:102-105 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L102)), so GEN-7 (state left "running" after a failure) is not present here.
+• Input checks before sending: null operation/queue, empty folio and empty message are detected per row (RepositorioTomi.cs:190-217 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L190)); the schedule check also rejects an INI >= FIN window (OperacionServicio.cs:180-185).
+• Time and ticks. Time is obtained through IParametrizacion rather than DateTime.Now, the shared base serializes ticks with a semaphore (no overlap), and XML documentation exists on every type and method (50 <summary> blocks).
+• Test tooling is already in place (MSTest 2.2.10 + Moq), so the fix for SOM-T1 is writing tests, not introducing a framework.
+4. Findings by Project (low/no-dependency -> high dependency)
+Finding IDs use SOM-<project letter><n>: A = AplicacionSwfOUTMQ, I = InfraestructuraSwfOUTMQ, H = host, T = tests, B/S/D = build, SQL contract and duplication (cross-project). Line numbers are for commit 89db348.
+4.1 AplicacionSwfOUTMQ (Tier 0)
+MustChange / Rewrite
+None in this project. The Application layer's own defects are contract and observability issues (below); the defects that can lose or strand a message live in Infraestructura (4.2).
+Rewrite Recommended
+SOM-A1 - Holiday and out-of-window ticks log an ERROR (and a holiday inserts an alert row) on every tick (GEN-10)
+Severity: Major (P2). Category: rewrite_recommended. Checklist: error handling / observability. Locations: OperacionServicio.cs:130-139 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L130), :190-192 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L190), ServicHost.cs:82 (../../SWIFT/Outgoing/SWF_OUT_MQ/SwfOUTMQ/ServicHost.cs#L82).
+Code block (csharp)
+LogError(ConstantesServicio.MensajeDiaInhabil);                                           // 134
+await RegistrarAlertaAsync(ConstantesClaveAviso.Error, null, ConstantesServicio.MensajeDiaInhabil); // 136
+...
+var mensaje = $"El servicio '{_configuracion.NombreServicio}' está fuera de horario";
+LogError(mensaje);                                                                        // 191 - every night, every tick
+_containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);                      // ServicHost.cs:82 - registered, never resolved
+Because the operations are read before the schedule gate (SOM-A5), these branches run on every tick *while messages are waiting*: a non-business day with pending messages inserts one alert row and one ERROR line per tick (8,640 rows/day at the 10 s fallback interval; the shared helper adds further log lines), and every out-of-window tick writes an ERROR. Being outside the window is an expected state for a scheduled sender; the identical rows hide real alerts and can become a notification storm if anything consumes the alert table. EstadoHorarioOperacion (the shared transition-tracking DTO) is registered but unused, so the throttle that would fix this exists but is not wired.
+Code block (csharp)
+if (!ventanaAbierta) {
+    if (_estado.CambioA(Omitido)) LogInfo($"Fuera de horario; {operaciones.Count()} mensajes retenidos hasta {inicio}.");
+    return ResultadoEjecucion.Omitido;          // no ERROR, no alert row
+}
+Fix/benefit: log only transitions at INFO, alert once per transition (or when held messages exceed an age threshold, which is the useful signal). Confirm the holiday policy with the owners (holding messages may be intended; alerting on every tick is not). Suggested JIRA: SOM-A1 (P2).
+SOM-A2 - Null/empty validation of parameters is unreachable, and batch mode still needs the schedule keys
+Severity: Minor (P3). Category: rewrite_recommended. Checklist: dead code / validation. Locations: OperacionServicio.cs:60-66 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L60), :149-164 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L149), RepositorioTomi.cs:230-234,419-428 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L230).
+Code block (csharp)
+var gbMensajesBatch = _configuracion.ParametrosSistema[ConstantesServicio.SWFOUTGETMTBATCH];   // Dictionary<string,string> indexer
+if (gbMensajesBatch == null) { LogError(ConstantesServicio.MensajeBatch); return false; }       // can never be true
+ParametrosSistema is a Dictionary<string,string>: a missing key throws KeyNotFoundException, it never yields null. In addition, Parametrizacion.ObtenerParametrosSistemaAsync already throws when any requested key is missing or blank (Parametrizacion.cs:238-248 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Aplicacion/Control/Parametrizacion.cs#L238)) and both constant lists are requested as *required*. So the == null branch, the IsNullOrEmpty(inicio/fin) branches (149-164), the MensajeBatch/MensajeHoraInicio/MensajeHorafin texts, the if (!actualizado) branch in the repository (the update method throws instead of returning false, lines 372/403) and the "missing key" fallback in ObtenerValor (419-428) are all unreachable. The real behavior is the shared library's InvalidOperationException, which surfaces as a generic CRITICAL alert from the catch at line 96-100. A side effect: HORA_OP_INICIO/HORA_OP_FIN are mandatory even in batch mode, where they are never used. The *neighbouring* branch is reachable and fragile: bool.TryParse accepts only True/False (isolated probe: '1' and 'S' are rejected), so any other spelling of the flag makes every tick log MensajeConfiguracionBatch and return before sending anything (no alert, SOM-I5).
+Fix/benefit: delete the dead branches or request only the keys needed for the active mode (ObtenerParametrosSistemaAsync(ParametroSistemaDefinicion[]) supports per-key Requerido), and use TryGetValue with a named message. Smaller code, truthful tests. Suggested JIRA: SOM-A2 (P3).
+SOM-A3 - The cancellation token never reaches the work, and the finally marker is skipped on shutdown
+Severity: Major (P2). Category: rewrite_recommended. Checklist: resilience / graceful shutdown. Locations: OperacionServicio.cs:73,102-105,213 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L73), RepositorioTomi.cs:41,342 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L41).
+Code block (csharp)
+var operaciones = await _repositorioTomi.RecuperaOperacionesAsync().ConfigureAwait(false);   // no ct
+return await ProcesarOperacionesAsync(operaciones);                                          // -> GuardaMensajesOutMQ(operaciones): no ct
+...
+finally { await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio, ct); }  // same ct
+EjecutarProcedimientosAsync accepts ct, but only the first marker call uses it. The repository interface has no token at all, so a stop request cannot interrupt a batch of any size (the procedure is unbounded, SOM-S1). The shared base waits 60 s for the running tick and then continues the shutdown without it (WindowsServiceHostBase.cs OnStop (../../General/MUFGT24_BTMUM_64/MUFG_T24/Core/Estructura/WindowsServiceHostBase.cs#L113), lines 113-141), so a long batch can be abandoned between SNDNG and PROC (SOM-I3). Conversely the finally re-uses the *already-cancelled* token: ActualizaTerminacion(ct) starts with ct.ThrowIfCancellationRequested() (RepositorioMaestro.cs:1197 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L1197)), so on shutdown the in-tick termination marker throws instead of writing (the host's own TerminacionAsync later writes it with the cleanup token, which limits the damage).
+Code block (csharp)
+Task<ResultadoLote> PublicarAsync(IReadOnlyList<OperacionSWF> ops, CancellationToken ct);   // check ct between messages, never mid-message
+...
+finally { using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+              await _controlServicio.ActualizaTerminacion(nombre, cts.Token); }              // finalize independent of the stop token
+Fix/benefit: a stop request finishes the in-flight message, leaves the rest INI, and the marker is written reliably. Add a bounded batch size (SOM-S1) so the 60 s wait is realistic. Suggested JIRA: SOM-A3 (P2).
+SOM-A4 - Task<bool> conflates "nothing to do", "skipped", "failed" and "partly failed"
+Severity: Major (P2). Category: rewrite_recommended. Checklist: error handling / testability. Locations: OperacionServicio.cs:65,70,78,88,91,100,221 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L65), ServicHost.cs:128 (../../SWIFT/Outgoing/SWF_OUT_MQ/SwfOUTMQ/ServicHost.cs#L128).
+false is returned for invalid configuration (65, 70), an empty queue (78), a holiday (88), out-of-window (91), an exception (100), an MQ failure (221) - and true is returned when every message failed individually (SOM-I6). The host awaits the call and discards the result (line 128), so even the coarse signal is lost, and the unit tests (SOM-T1) cannot assert which situation occurred. The SWF_OUT_MQ_GCMS twin already introduced a three-state enum (ResultadoOperacionMq { Exitosa, Rechazada, Fallida }), a sign of drift between the copies (SOM-D1).
+Code block (csharp)
+public enum ResultadoEjecucion { SinTrabajo, Omitido, Procesado, ProcesadoConErrores, Fallido }
+Task<ResultadoEjecucion> EjecutarProcedimientosAsync(CancellationToken ct);
+Fix/benefit: the host can log one summary line per tick only when something happened, alerting can key off Fallido/ProcesadoConErrores, and tests can assert each branch. Suggested JIRA: SOM-A4 (P2).
+Nice to Rewrite if Time Permits
+SOM-A5 - Per-tick work is ordered wastefully
+Severity: Minor (P3). Category: NiceToRewrite_ifTimePermits. Locations: OperacionServicio.cs:73-93,113-119 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L73).
+Every tick performs ActualizaEJecucion, ObtenerFechaSistemaAsync (assigned to _configuracion.FechaSistema at line 117 and never read by first-party code), EsDiaHabil() (also in batch mode, where it is unused), a 14-key parameter query (the shared reader logs one INFO line per key, about 121,000 lines/day at 10 s), and only then the operations read (73) *before* the day/window gate (85-93). On a holiday or out of hours the service therefore queries the full pending set just to skip it (and to alert, SOM-A1).
+Fix/benefit: evaluate the cheap gates first (batch flag, window, day), read operations only when sending is allowed, drop the unused system-date call, and use the EsDiaHabil(ct) overload. Fewer round trips and log lines per tick. Suggested JIRA: SOM-A5 (P3).
+SOM-A6 - Constants, naming and contract hygiene
+Severity: Minor (P3). Category: NiceToRewrite_ifTimePermits. Locations: ConstantesServicio.cs (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/Enums/ConstantesServicio.cs), IRepositorioTomi.cs:11-37 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/Interfaces/IRepositorioTomi.cs#L11), ServicHost.cs (../../SWIFT/Outgoing/SWF_OUT_MQ/SwfOUTMQ/ServicHost.cs).
+• One non-static public class holds 75 constants of five kinds (SQL names, config keys, MQ reason texts, log texts, status codes); 10 are never referenced (Servicio, MaxSpTimeout, SWFCRITERIOCOMPLETO, Application, MensajeErrorGeneral, MensajeError, MensajeOnStart, MensajeElapsed, ErrorHora, MensajeFueraDeServicio).
+• Typos/mislabels: "Establediendo" (MensajeConexionExitosa, whose text says *establishing* and is logged before the connection attempt, line 60), "deesconectar", "Emeal"; ParametroWsT24MwPassword carries a name from another solution (it lists the four MQ secrets).
+• IRepositorioTomi<Tipo> is generic, but GuardaMensajesOutMQ is hard-wired to OperacionSWF; the method name lacks the Async suffix its siblings use and describes the opposite of what it does (it *sends* to MQ and updates status).
+• The host file is named ServicHost.cs while the class is ServiceHost; the interface parameters Folio/Estatus (ActualizaEstatusMensajeOutMQAsync(string Folio, string Estatus)) are PascalCase instead of camelCase.
+Fix/benefit: split into small static classes (SqlNames, ParametrosMq, Estados), delete the unreferenced constants, correct the labels, drop the unused generic parameter and rename the method (PublicarEnMqAsync). Low risk, better readability. Suggested JIRA: SOM-A6 (P3).
+4.2 InfraestructuraSwfOUTMQ (Tier 1)
+MustChange / Rewrite
+SOM-I1 - The status procedure the code calls does not exist in the SQL project (GEN-13)
+Severity: Blocker (P0). Category: MustChange/rewrite. Checklist: correctness / deployment contract. Locations: ConstantesServicio.cs:19 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/Enums/ConstantesServicio.cs#L19), RepositorioTomi.cs:361 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L361), SQL 002 (lines 9, 40, 43) (<../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/002 SP usp_ActualizaEstatusEnvioMensajeSWFOutMq.sql>), DBMDW.sqlproj:1159.
+Code block (csharp)
+public const string uspActualizaEstatusEnvioMensajeSWFOutMq = "usp_ActualizaEstatusEnvioMensajeSWFOutMq";   // what the service calls
+Code block (sql)
+-- file name: 002 SP usp_ActualizaEstatusEnvioMensajeSWFOutMq.sql   -- but the object it creates is:
+CREATE PROCEDURE dbo.usp_ActualizaEstatusMensajeSWFOutMq          -- no "Envio"
+A search of every .sql and .cs file in the portfolio finds no definition of `usp_ActualizaEstatusEnvioMensajeSWFOutMq`; the only definition is the shorter name. EjecutarStoredProceduredNonQuery turns the SQL error ("Could not find stored procedure") into Exito=false; the repository then throws InvalidOperationException (line 372), which ProcesarOperacionAsync catches and logs (line 253-255) - before the MQ put. The row stays INI, so on every tick every pending message repeats the same failure and nothing is ever sent; the only trace is ERROR log lines (no alert, no e-mail - see SOM-I5). If a database object with the code's name exists out of band (hand-deployed), the service works, but then the SQL project is not the deployable source of truth. The SWF_OUT_MQ_GCMS twin uses the same constant name against usp_ActualizaEstatusMensajeSWFOutMqGcms (its own review must confirm).
+Code block (csharp)
+// pick one name and make the file, the object and the constant agree (the file name already says "Envio"):
+public const string UspActualizaEstatusEnvio = "usp_ActualizaEstatusEnvioMensajeSWFOutMq";
+Code block (sql)
+CREATE PROCEDURE dbo.usp_ActualizaEstatusEnvioMensajeSWFOutMq ...   -- also fix header NOMBRE and the DROP statement
+Fix/benefit: align the name in one place, then add a build-time contract check (parse the ConstantesServicio usp* values and assert each appears in a CREATE PROCEDURE in the .sqlproj) and a start-up preflight (OBJECT_ID(...) for the three procedures, failing the start with a clear message). Verify against the deployed database before release. Suggested JIRA: SOM-I1 (P0).
+SOM-I2 - A failed read of pending operations looks like "no operations to process"
+Severity: Major (P1). Category: MustChange/rewrite. Checklist: error handling (GEN-11). Locations: RepositorioTomi.cs:342-345 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L342), OperacionServicio.cs:73-79 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L73).
+Code block (csharp)
+var resultado = await EjecutarReader<OperacionSWF>(ConstantesServicio.uspObtenerOperacionesSWFOutMq);
+return resultado.Data;                                   // Exito / MensajeError never inspected
+...
+if (operaciones == null || !operaciones.Any()) { LogInfo("No hay operaciones para procesar."); return false; }
+EjecutarReader does not throw on database errors: a SqlException sets Exito=false, MensajeError and returns an empty Data list (RepositorioMaestro.cs:202-212 (../../General/MUFGT24_BTMUM_64/MUFG_T24/Infraestructura/Repositorios/DBs/RepositorioMaestro.cs#L202)); the SqlException branch writes no log line at all. A timeout, a permission error, a dropped connection or a missing procedure is therefore reported as an INFO "nothing to process" - the queue looks healthy while SWIFT messages accumulate. Two related details: the call uses the default CommandType.Text with a bare procedure name (it works only because a batch that consists solely of a procedure name is an implicit EXEC; use CommandType.StoredProcedure), and no timeout is passed although MaxSpTimeout = 10 is declared (SOM-A6), so the 30 s default applies.
+Code block (csharp)
+var r = await EjecutarReader<OperacionSWF>(ConstantesServicio.uspObtenerOperacionesSWFOutMq, null,
+            CommandType.StoredProcedure, commandTimeout: ConstantesServicio.MaxSpTimeout, ct: ct);
+if (!r.Exito) throw new InvalidOperationException($"Lectura de operaciones fallida: {r.MensajeError}", r.Exception);
+return r.Data;
+Fix/benefit: a read failure becomes a visible ERROR/alert (SOM-I5) instead of silence. Test with a fake whose reader returns Exito=false. The same shape appears across the portfolio (GEN-11). Suggested JIRA: SOM-I2 (P1).
+SOM-I3 - The INI -> SNDNG -> PROC hand-off has no recovery: stuck or ambiguous rows are never re-read, reported or reconciled
+Severity: Major (P1). Category: MustChange/rewrite. Checklist: data integrity / reliability. Location: RepositorioTomi.cs:190-257 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L190); SQL 001 (selects cve_estatus = 'INI' only).
+Code block (csharp)
+await ActualizaEstatusMensajeOutMQAsync(folio, "SNDNG");                       // 228  DB write 1 (own transaction)
+queue.Put(mqMessage, new MQPutMessageOptions());                               // 238  MQ write (no syncpoint, no DB link)
+var procesado = await ActualizaEstatusProcesoSWFOutMqAsync(folio);             // 240  DB write 2 (own transaction)
+if (!procesado) { LogError("... Favor de actualizar manualmente."); throw new Exception(...); }   // 241-244 -> caught at 253, logged again
+The three writes are independent, and only INI rows are selected, so any interruption leaves a row nobody looks at again. A search of all C# and SQL under SWIFT and StoredProcedures finds the literal SNDNG only in this solution's constants and send step and the same two places in the GCMS/TMP twins - no reader, retry, alert or report for it:
+Interruption point	State left behind	Reality
+After SNDNG, before/at the put (service stop, crash, SQL timeout, non-MQ exception)	SNDNG	message never sent, nobody told
+Put succeeded, PROC update fails or throws (line 240-245)	SNDNG	message delivered, DB says "sending"; log says "update manually", no alert
+Put fails with MQException	ERROR	never retried automatically (SOM-I4)
+
+For outgoing SWIFT messages "silently not sent" and "sent but unknown" are the worst outcomes, and they are indistinguishable from the database. The current design is at-most-once (no duplicates after a crash) but with no detection of the loss.
+Code block (sql)
+-- illustrative only; fec_claim does not exist today
+UPDATE TOP (@Max) c SET cve_estatus = 'SNDNG', fec_claim = GETDATE()
+OUTPUT inserted.folio INTO @claimed
+FROM tb_srv_swf_swift_out_ctl c WHERE c.cve_estatus = 'INI' AND c.tipo_operacion = 'SWIFT_OUT';          -- atomic claim (also fixes SOM-S1)
+SELECT folio FROM tb_srv_swf_swift_out_ctl WHERE cve_estatus = 'SNDNG' AND fec_claim < DATEADD(MINUTE,-15,GETDATE());   -- reconciliation/alert query
+Fix/benefit: (1) claim rows atomically with a timestamp; (2) retry the idempotent PROC update a few times and never revert a row to INI after a successful put; (3) alert on any SNDNG older than N minutes with the folio list and give operations a runbook (check the queue/gateway, then mark PROC or INI); (4) put the folio into an agreed MQMD field so the consumer or an operator can confirm delivery (SOM-I7); (5) on stop (SOM-A3) finish or release the in-flight message. Owner decisions needed: retry vs manual resolution, and the maximum acceptable age of a SNDNG row. Suggested JIRA: SOM-I3 (P1).
+SOM-I4 - Any MQ error is treated as message-specific: an outage mid-batch turns every remaining message into a permanent ERROR
+Severity: Major (P1). Category: MustChange/rewrite. Checklist: error handling / resilience. Locations: RepositorioTomi.cs:238,247-252 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L247), MQErrorHandler.cs (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Messaging/MQErrorHandler.cs).
+Code block (csharp)
+catch (MQException ex)
+{
+    LogError($"Error MQ en PUT | Folio={folio} | Reason={ex.Reason} | {ex.Message}");
+    await ActualizaEstatusMensajeOutMQAsync(folio, ConstantesServicio.estatusERROR).ConfigureAwait(false);   // terminal; loop continues
+}
+An MQException can describe the *message* (for example 2030 message too big for the queue) or the *channel/queue* (2009 connection broken, 2059/2161/2162 queue manager unavailable/quiescing/stopping, 2053 queue full, 2051 put inhibited, 2537/2538 channel or host unavailable). For the second class the next put hits the same condition, so one MQ restart or full queue during a batch marks every remaining message `ERROR`; the selection procedure only reads INI, so those rows are never retried and need hand-made SQL to recover. (A failure to *connect* at line 62 correctly leaves rows untouched and returns false; the damage happens only once the loop is running.) In addition, the status update inside this catch can itself throw (database outage at the same moment); that exception escapes ProcesarOperacionAsync, aborts the loop and falls into the outer generic catch (e-mail), leaving the current row SNDNG (SOM-I3). MQErrorHandler has no entries for the put-relevant codes 2053, 2051, 2030, 2031, 2161, 2162, 2537 (and its 2540 text is wrong, SOM-I10).
+Code block (csharp)
+catch (MQException ex) when (MqReasons.EsDeCanal(ex.ReasonCode))      // 2009, 2059, 2161, 2162, 2053, 2051, 2537, 2538 ... (confirm with MQ admins)
+{
+    await LiberarAINIAsync(folio);                                    // nothing was delivered
+    throw;                                                            // abort the batch; the next tick reconnects
+}
+catch (MQException ex)                                                // message-specific
+{
+    await MarcarErrorAsync(folio, ex.ReasonCode);                     // with reason + retry counter, and alert (SOM-I5)
+}
+Fix/benefit: transient infrastructure faults delay messages instead of failing them permanently; only genuine message faults reach ERROR. Add a bounded retry counter and a reason column so ERROR rows are visible and replayable. Test with a fake publisher raising each class (SOM-I8). Suggested JIRA: SOM-I4 (P1).
+SOM-I5 - Most real failure modes produce only a log line: no alert row and no e-mail
+Severity: Major (P1). Category: MustChange/rewrite. Checklist: observability / error handling. Locations: RepositorioTomi.cs:49,83-93,281-303 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L83), OperacionServicio.cs:96-100,212-222 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L96).
+Notification exists in two unrelated mechanisms and covers little:
+Failure	Where handled	Notified?
+MQ connect/put outside the loop (MQException, line 83-88): broker down, TLS/cert error, 2035 not authorized	log + return false	No (neither e-mail nor alert)
+Parameter or port problem (ConfigurationErrorsException, thrown at line 49 outside the try)	OperacionServicio catch (214-221): log only	No
+Non-MQ exception inside the try (line 89-93)	log + SMTP e-mail	e-mail only, one per tick while it persists (up to 8,640/day at 10 s)
+Per-message failures, SNDNG stuck, update failures (SOM-I3, I4, I6)	log only	No
+Database read failure (SOM-I2), missing procedure (SOM-I1)	log only / nothing	No
+Exception reaching EjecutarProcedimientosAsync (line 96-100)	log + critical alert row	Yes (alert table)
+
+An MQ outage or an expired certificate on a payment channel is the single most likely production incident, and it is visible only to someone reading the log file. When the e-mail path *is* used it has no rate limit, and NotificarErrorAsync is itself unguarded.
+Code block (csharp)
+public interface INotificadorOperativo { Task NotificarAsync(Incidente incidente, CancellationToken ct); }   // alert row + e-mail, de-duplicated by signature
+await _notificador.NotificarAsync(new Incidente("MQ_PUT", firma: $"{ex.ReasonCode}", detalle: resumen), ct);  // first occurrence, then at most every 30 min, plus a recovery notice
+Fix/benefit: one notification policy: alert on the first occurrence of a distinct failure signature, rate-limit repeats, include counts (sent/failed/held) and send a recovery message. Use the already-injected IAlertas instead of a second, SMTP-only path. Confirm who receives MAIL_TO/MAIL_ERROR today. Suggested JIRA: SOM-I5 (P1).
+Rewrite Recommended
+SOM-I6 - Per-message outcomes are swallowed; poison rows repeat forever and a failed batch reports success
+Severity: Major (P2). Category: rewrite_recommended. Checklist: error handling. Locations: RepositorioTomi.cs:74-81,190-257 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L74).
+Code block (csharp)
+foreach (var operacion in operaciones)
+{
+    contador++;
+    await ProcesarOperacionAsync(operacion, queue);                                       // returns Task (no result); every failure is caught inside
+    LogInfo($"Procesado {contador} de {total} - Folio: {operacion?.Folio ?? "(sin folio)"}");   // also printed for skipped and failed rows
+}
+return true;                                                                              // line 81: true even if all messages failed
+(a) ProcesarOperacionAsync returns nothing and catches everything, so GuardaMensajesOutMQ returns true after total failure and the caller cannot tell (SOM-A4). (b) The counter line says "Procesado 3 of 10" for rows that were skipped or failed. (c) Rows with a null/empty folio or message (lines 195-217) are logged and returned without any status change; they stay INI, so the same ERROR lines repeat every tick forever and the row is never quarantined. (d) The if (!actualizado) branch is unreachable (SOM-A2).
+Code block (csharp)
+public sealed class ResultadoLote { public int Enviados; public int Fallidos; public int Omitidos; public IReadOnlyList<string> FoliosConError; }
+// invalid rows -> MarcarErrorAsync(folio, "FOLIO_O_MENSAJE_VACIO") once, so they leave the queue and are reported
+LogInfo($"Lote terminado: {r.Enviados} enviados, {r.Fallidos} con error, {r.Omitidos} omitidos de {total}.");
+Fix/benefit: honest counters, quarantined poison rows, and a lot result the application layer can act on. Suggested JIRA: SOM-I6 (P2).
+SOM-I7 - MQ message and put options leave persistence, traceability and quiescing behavior to defaults
+Severity: Major (P2). Category: rewrite_recommended. Checklist: messaging reliability. Locations: RepositorioTomi.cs:70,238,263-270 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L263).
+Code block (csharp)
+queue = queueManager.AccessQueue(config.QueueName, MQC.MQOO_OUTPUT);                  // 70
+queue.Put(mqMessage, new MQPutMessageOptions());                                      // 238
+var mqMessage = new MQMessage(); mqMessage.Format = MQC.MQFMT_STRING; mqMessage.CharacterSet = 1208;   // 265-267 only
+MQMessage.Persistence defaults to the *queue's* default (MQPER_PERSISTENCE_AS_Q_DEF); if the queue is defined DEFPSIST(NO), the broker can discard these messages on a restart after the database already says PROC. No message/correlation id carries the folio, so neither the consumer nor an operator can match a message to its row, and there is no expiry or MQOO_FAIL_IF_QUIESCING/MQPMO_FAIL_IF_QUIESCING (a quiescing manager can keep the client waiting). The downstream consumer's contract (persistence, ids, expiry, ordering) was not available, so this is a verify-then-set finding.
+Code block (csharp)
+var m = new MQMessage { Format = MQC.MQFMT_STRING, CharacterSet = 1208, Persistence = MQC.MQPER_PERSISTENT };
+m.ApplicationIdData = folio;                                   // CorrelationId/MessageId are limited to 24 bytes; the procedures declare @Folio VARCHAR(30)
+queue = qm.AccessQueue(name, MQC.MQOO_OUTPUT | MQC.MQOO_FAIL_IF_QUIESCING);
+queue.Put(m, new MQPutMessageOptions { Options = MQC.MQPMO_FAIL_IF_QUIESCING });
+Fix/benefit: durable, traceable messages and clean behavior during broker maintenance. Agree the MQMD contract with the SWIFT-gateway owners first; consider MQ syncpoint/outbox patterns if exactly-once is required (architecture note, section 5). Suggested JIRA: SOM-I7 (P2).
+SOM-I8 - RepositorioTomi mixes database, IBM MQ client, SMTP, configuration parsing and logging, so none of it is testable
+Severity: Major (P2). Category: rewrite_recommended. Checklist: SRP / DI / testability (baseline Repository + DI). Locations: RepositorioTomi.cs:41-117,122-180,281-303,310-324 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L41).
+One 442-line class (a) reads and updates TOMI, (b) constructs MQQueueManager/MQQueue/MQMessage directly (lines 62, 70, 265), (c) calls the static CorreoHelper.EnviarCorreoAsync (292), (d) turns TOMI parameters into a ConfiguracionMQ (122-139), and (e) owns three private logging helpers that call the static Config.EscribirLog (310-324). The "interface" IRepositorioTomi exposes GuardaMensajesOutMQ, so the Application layer cannot test the send workflow without an IBM MQ broker, and the DB protocol (SOM-I3), failure classification (SOM-I4) and notification (SOM-I5) cannot be unit-tested at all. This is the root cause of SOM-T1.
+Code block (csharp)
+public interface IMqPublisher : IDisposable { void Conectar(); void Publicar(string folio, string texto); }   // IBM MQ details only
+public interface IRepositorioSalidaSwift { Task<IReadOnlyList<OperacionSWF>> LeerPendientesAsync(CancellationToken ct); Task<bool> MarcarAsync(string folio, EstadoSalida estado, CancellationToken ct); }
+public sealed class PublicadorSalidaSwift { /* orchestrates read -> claim -> publish -> mark -> classify -> notify, using only interfaces */ }
+Fix/benefit: PublicadorSalidaSwift becomes fully unit-testable with fakes (broker down mid-batch, put fails, PROC update fails, empty message), matching the baseline's one-responsibility/DI guidance. Do this together with SOM-I3/I4/I5 rather than separately. Suggested JIRA: SOM-I8 (P2).
+SOM-I9 - Exception and log handling: triple logging, a generic Exception as control flow, a mislabeled log source
+Severity: Minor (P3). Category: rewrite_recommended. Checklist: exception handling. Locations: RepositorioTomi.cs:151,243-244,371,378,255 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Repositorio/RepositorioTomi.cs#L243).
+• A failed status update is logged three times: inside the update (line 371), in its catch with the full {ex} (378), and again by the caller (255). Line 371's label is ActualizaEstatusProcesoSWFOutMqAsync although it sits in ActualizaEstatusMensajeOutMQAsync (copy-paste), which misdirects triage.
+• throw new Exception($"...Favor de actualizar manualmente.") (244) is used as control flow inside the same try, caught by the generic catch two lines later; the type tells a caller nothing and the text mixes an operator instruction into an exception message.
+• ObtenerEnteroObligatorio(string clave) always reports ConstantesServicio.PORT in its message (151) instead of clave, and does not range-check (1-65535).
+Code block (csharp)
+public sealed class EstatusNoActualizadoException : Exception { public EstatusNoActualizadoException(string folio, string estatus, string detalle) : base($"Folio={folio} Estatus={estatus}: {detalle}") { } }
+Fix/benefit: one log at the boundary that handles the error, typed exceptions, accurate labels. Suggested JIRA: SOM-I9 (P3).
+Nice to Rewrite if Time Permits
+SOM-I10 - MQErrorHandler hard-codes reason-code numbers in the global namespace
+Severity: Minor (P3). Category: NiceToRewrite_ifTimePermits. Location: MQErrorHandler.cs:1-55 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/Messaging/MQErrorHandler.cs#L1).
+A public, non-static class in the global namespace of the Infrastructure assembly switches on 11 numeric literals and returns Application-layer constants, although the IBM client defines MQC.MQRC_* symbolic constants. It includes 2033 (NO_MSG_AVAILABLE), a *get-only* reason that cannot occur on a put-only queue handle, mislabels `2540`: Codigo2540 says "MQRC_CHANNEL_NOT_AVAILABLE: Canal no disponible", but in IBM's constants 2540 is MQRC_UNKNOWN_CHANNEL_NAME (a configuration error) and MQRC_CHANNEL_NOT_AVAILABLE is 2537 (a transient one) - so an operator is told the wrong thing (verified against the IBM cmqc header values published in ibm-messaging/mq-golang; the other ten literals in the catalog match), and it misses the put-relevant codes listed in SOM-I4. It only produces text; it does not classify.
+Code block (csharp)
+internal static class MqReasons
+{
+    public static CategoriaMq Clasificar(int rc) { switch (rc) { case MQC.MQRC_CONNECTION_BROKEN: case MQC.MQRC_Q_MGR_NOT_AVAILABLE: case MQC.MQRC_Q_FULL: ... return CategoriaMq.Transitoria; ... } }
+}
+Fix/benefit: namespace, symbolic constants and a category used by SOM-I4/I5 make the catalog useful rather than decorative. Suggested JIRA: SOM-I10 (P3).
+4.3 SwfOUTMQ host (Tier 2)
+MustChange / Rewrite
+None in the host itself (its startup/shutdown handling is a Major rewrite item below; the composition is correct).
+Rewrite Recommended
+SOM-H1 - Startup/shutdown/state-marker results are discarded while the log says "success" (GEN-9)
+Severity: Major (P2). Category: rewrite_recommended. Checklist: error handling / observability. Locations: ServicHost.cs:103,128,160,163-165 (../../SWIFT/Outgoing/SWF_OUT_MQ/SwfOUTMQ/ServicHost.cs#L103), OperacionServicio.cs:104,115 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/OperacionServicio.cs#L104).
+Code block (csharp)
+await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, ..., ct);            // 103 returns bool, ignored
+await operacionServicio.EjecutarProcedimientosAsync(ct).ConfigureAwait(false);                    // 128 result ignored (SOM-A4)
+await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, nombre, cleanupCt);               // 160 comment says "en uso" but passes nulls (frees the row)
+await _controlServicio.ActualizaTerminacion(nombre, cleanupCt);                                   // 163 StoredProcedureResult ignored
+Config.EscribirLog(ConstantesServicio.MensajeTerminacionExitosa);                                 // 165 logs success regardless
+MarcarPuertoEnUsoAsync returns resultado.Exito (a failure does not throw) and ActualizaTerminacion/ActualizaEJecucion return a StoredProcedureResult whose Exito flag reports failure. The service can therefore run without its "in use" registration, or log "Terminación exitosa" while the termination marker was not written; monitoring that relies on those rows then reads stale state. The shutdown call also passes null PID/name under a comment that says "marca el servicio en uso" (it frees the row - correct behavior, misleading comment). OperacionServicio.cs:104 and :115 ignore the same result type. (The .Pid.Value at line 103 is safe: ObtenerProcesoActualAsync assigned the PID just before, so GEN-8 is ruled out here.)
+Code block (csharp)
+if (!await _controlServicio.MarcarPuertoEnUsoAsync(pid, proceso, display, servicio, ct))
+    throw new InvalidOperationException("No se pudo registrar el servicio en uso; se aborta el arranque.");   // SCM shows the failed start
+var r = await _controlServicio.ActualizaTerminacion(nombre, cleanupCt);
+Config.EscribirLog(r.Exito ? MensajeTerminacionExitosa : $"WARN|OnStop|Terminación no registrada: {r.MensajeError}");
+Fix/benefit: startup fails loudly if registration fails, and shutdown logs what actually happened. Fix the comment. Suggested JIRA: SOM-H1 (P2).
+Nice to Rewrite if Time Permits
+SOM-H2 - Composition-root clean-up
+Severity: Minor (P3). Category: NiceToRewrite_ifTimePermits. Locations: ServicHost.cs:32,50-51,82,105-114,131-134 (../../SWIFT/Outgoing/SWF_OUT_MQ/SwfOUTMQ/ServicHost.cs#L32).
+EstadoHorarioOperacion is registered (line 82) and never resolved (see SOM-A1); the 10,000 ms fallback (line 32) is a magic number; Alertas is registered concretely and again as IAlertas (50-51); the two catch blocks in ParametrizacionesAsync (105-114) are identical log-and-rethrow bodies, and OnTimerAsync (131-134) repeats the catch-and-log that the shared base already performs around every tick (so a failure is logged twice with different prefixes). The file is named ServicHost.cs for class ServiceHost.
+Fix/benefit: delete unused registrations, name the constant, keep one catch per boundary, rename the file (IDE rename keeps the csproj entry consistent). Suggested JIRA: SOM-H2 (P3).
+4.4 PruebasUnitarias (Tier 2)
+MustChange / Rewrite
+SOM-T1 - The only test class cannot run or pass, and covers none of the critical logic (GEN-2)
+Severity: Major (P1). Category: MustChange/rewrite. Checklist: tests. Location: SwfOUTMQTest.cs:16-117 (../../SWIFT/Outgoing/SWF_OUT_MQ/PruebasUnitarias/SwfOUTMQTest.cs#L16).
+Three [TestMethod]s and three Assert calls, but reading the code shows none can pass:
+Defect	Evidence
+The object under test is never created	private OperacionServicio _servicio = null; (line 22) is never assigned; every test calls _servicio.EjecutarProcedimientosAsync(...) (lines 60, 86, 112) -> NullReferenceException
+Invalid lifecycle methods	Two [TestInitialize] methods in one class (lines 24 and 34); the first is private. Setup() builds a config local variable that is never used, so it prepares nothing. MSTest expects one public, parameterless initializer
+Test methods with parameters	Lines 58 and 72 declare (CancellationToken ct); MSTest [TestMethod]s are parameterless unless a data source is supplied
+Names contradict assertions	..._ReturnsFalse_WhenNoDiaHabil asserts IsTrue (line 88); _ReturnsTrueTest has no arrangement; the third test is named ValidacionProcesos and asserts IsFalse
+Mocks do not match production	Line 112 mocks the legacy two-argument ObtenerParametrosSistemaAsync(string, string) (marked [Obsolete]), but production calls the three-argument overload with a token (OperacionServicio.cs:119); the returned dictionary uses HORA_OP_SWF_JU_* keys from another solution and lacks the 14 keys this service requires; _repositorioTomi is never configured
+Nothing else is covered	No test for RepositorioTomi, MQErrorHandler, the host, SNDNG/PROC/ERROR transitions, MQ failures, schedule boundaries or notification
+
+So the suite gives false assurance (a project named "tests" exists) while the highest-risk paths - SOM-I1, I3, I4, I6 - are untested. The project also cannot build without D:\ServiceCMS\MUFG_T24.dll (SOM-B1). (Not executed here; no toolchain.)
+Code block (csharp)
+[TestClass] public class PublicadorSalidaSwiftTests
+{
+    [TestInitialize] public void Init() { _repo = new Mock<IRepositorioSalidaSwift>(); _mq = new Mock<IMqPublisher>(); _sut = new PublicadorSalidaSwift(_repo.Object, _mq.Object, ...); }
+    [TestMethod] public async Task ConexionRotaAMitadDeLote_LiberaFilaYAbortaLote() { _mq.Setup(m => m.Publicar("F2", It.IsAny<string>())).Throws(MqEx(2009)); ... Assert.AreEqual(ResultadoEjecucion.Fallido, r); _repo.Verify(x => x.MarcarAsync("F2", EstadoSalida.Ini, ...)); }
+}
+Fix/benefit: after the refactor in SOM-I8, write table-driven tests for: read failure, success path (SNDNG -> put -> PROC order), put failure per reason class, PROC update failure, empty folio/message, holiday/out-of-window/batch-mode gates, cancellation between messages. Replace the file rather than patching it. Suggested JIRA: SOM-T1 (P1).
+4.5 Cross-project / solution level
+MustChange / Rewrite
+SOM-B1 - Absolute-path DLL references make the build machine-specific (GEN-1)
+Severity: Blocker (P0). Category: MustChange/rewrite. Checklist: build reproducibility / supply chain. Locations: AplicacionSwfOUTMQ.csproj:55 (../../SWIFT/Outgoing/SWF_OUT_MQ/AplicacionSwfOUTMQ/AplicacionSwfOUTMQ.csproj#L55), InfraestructuraSwfOUTMQ.csproj:55,58 (../../SWIFT/Outgoing/SWF_OUT_MQ/InfraestructuraSwfOUTMQ/InfraestructuraSwfOUTMQ.csproj#L55), SwfOUTMQ.csproj:63 (../../SWIFT/Outgoing/SWF_OUT_MQ/SwfOUTMQ/SwfOUTMQ.csproj#L63), PruebasUnitarias.csproj:74 (../../SWIFT/Outgoing/SWF_OUT_MQ/PruebasUnitarias/PruebasUnitarias.csproj#L74).
+Code block (xml)
+<Reference Include="MUFG_T24"><HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath></Reference>          <!-- x4: every project -->
+<Reference Include="amqmdnet, Version=9.4.0.20, ..."><SpecificVersion>False</SpecificVersion><HintPath>D:\ServiceCMS\amqmdnet.dll</HintPath></Reference>
+Five raw file references (4 x MUFG_T24.dll, 1 x amqmdnet.dll) to a path outside the repository, with SpecificVersion=False. D:\ServiceCMS does not exist on the audit machine, so nothing in the solution compiles here, and any build server or developer machine builds *whatever DLL happens to be there*, so the deployed behavior can differ from the reviewed source (this review reads MUFG_T24 source only as context). The portfolio has no nuget.config or MUFG .nupkg, so these are raw references (GEN-1). Unlike MUFG_T24, the IBM MQ client has an official NuGet distribution, so amqmdnet.dll can be restored from a feed without internal publishing.
+Code block (xml)
+<PackageReference Include="IBMMQDotnetClient" Version="9.4.x" />     <!-- or an internal feed mirror -->
+<PackageReference Include="MUFG.T24" Version="1.0.*" />              <!-- after publishing the shared library to an internal feed -->
+Fix/benefit: one versioned MUFG.T24 package (portfolio-wide fix, owned centrally) and the IBM client from a feed make builds reproducible and the deployed DLL identifiable; verify the package version equals what runs in production before switching. Suggested JIRA: SOM-B1 (P0).
+Rewrite Recommended
+SOM-S1 - SQL selection/update contract has no claim, limit or row-count check (context: SQL project, outside this repository)
+Severity: Major (P2). Category: rewrite_recommended. Checklist: data access / concurrency. Locations: 001 SP usp_ObtenerOperacionesSWFOutMq.sql:47-60 (<../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/001 SP usp_ObtenerOperacionesSWFOutMq.sql>), 002 (UPDATE) (<../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/002 SP usp_ActualizaEstatusEnvioMensajeSWFOutMq.sql>), 003 (UPDATE x3) (<../../StoredProcedures/MWD_DB/DBMDW/SWIFT/Outgoing/SWF_OUT_MQ/IT24/Procedures/003 SP usp_ActualizaEstatusProcesoSWFOutMq.sql>).
+Code block (sql)
+SELECT Ctl.folio AS Folio, Det.nf_mq_msg_etl AS Mensaje
+FROM tb_srv_swf_swift_out_ctl Ctl INNER JOIN tb_srv_swf_trabajo Det ON Ctl.folio = Det.nf_folio AND Ctl.tipo_operacion = Det.nf_tipo
+WHERE Ctl.cve_estatus = 'INI' AND Ctl.tipo_operacion = 'SWIFT_OUT' AND Det.NF_CVE_MENSAJE NOT IN ('MT-998');
+• No `TOP`/`ORDER BY`/claim: all INI rows are returned every tick in unspecified order, with no lock or marker, so two overlapping processes (restart overlap, a second host, a manual run) can read and publish the same rows; the "in use" marker is the only guard and was not verified. An unbounded read also makes the 60 s stop window unrealistic (SOM-A3).
+• Join cardinality: nothing in the scripts for this solution shows that (folio, tipo) is unique in tb_srv_swf_trabajo (no DDL for the two tables was found). If a folio has more than one work row, the folio is published more than once and each second SNDNG update would overwrite an earlier PROC.
+• `NOT IN ('MT-998')` silently drops rows whose NF_CVE_MENSAJE is NULL (comparison with NULL is unknown); excluded MT-998 rows stay INI forever - who consumes them is not documented here.
+• No `@@ROWCOUNT` check in the two status writers: a wrong or missing folio "succeeds", so a typo cannot be detected by the caller (and PROC is described as "procesando" in the header although it is written *after* the message was sent).
+• Procedures log errors to Auditoria.ErrorLog and THROW (good), but there is no reason/attempt column for ERROR rows (SOM-I4).
+Fix/benefit: one atomic claim procedure (UPDATE TOP (@Max) ... OUTPUT), an explicit uniqueness constraint or a SELECT DISTINCT, IS NULL-safe filtering, @@ROWCOUNT = 1 assertions and a reason/attempt column. Coordinate with the SQL owners; deploy with SOM-I1. Suggested JIRA: SOM-S1 (P2).
+SOM-D1 - Near-copy of the SWF_OUT_MQ_GCMS solution (and a third copy), already drifting (GEN-4)
+Severity: Minor (P2). Category: rewrite_recommended. Checklist: duplication. Evidence (non-blank trimmed lines of this solution that also occur in the twin): ServiceHost 93 % (114/123), MQErrorHandler 86 %, RepositorioTomi 81 % (236/293), ConstantesServicio 68 %, OperacionServicio 67 %, tests 34 %. A third folder, SWIFT\Outgoing\SWF_OUT_TMP, carries yet another copy of the GCMS variant.
+Every finding in this report (SP name constant, ERROR cascade, discarded results, tests) therefore exists, or will need to be re-applied, in at least two more places, and the copies have already diverged: the GCMS variant added a ResultadoOperacionMq enum and a larger repository (530 vs 442 lines) while this one did not. Fixes applied to one copy will not reach the others unless they share code.
+Fix/benefit: extract a shared Swf.Out.Mq core (publisher, status protocol, notification policy, MQ error classification) parameterized by queue configuration and SQL names, keep one thin host per queue, and retire SWF_OUT_TMP after confirming it is unused. Do this *after* the defects are fixed and covered by tests (SOM-T1), not before. Suggested JIRA: SOM-D1 (P2).
+5. Architecture-Fit Note
+Apply the standing architecture question in _ORCHESTRATION.md (./_ORCHESTRATION.md). This workload is a continuous poll-and-publish relay (database rows -> MQ queue) with a small scheduling gate, not a multi-step saga and not a heavy batch job. A Windows Service is a reasonable host for a low-volume relay, and none of the findings is *caused* by the hosting model: they stem from a status protocol with no recovery (SOM-I3), failure classification (SOM-I4), silent failure modes (SOM-I1, I2, I5) and missing tests (SOM-T1). What the hosting model does expose is the "two systems, no shared transaction" problem: the DB status write and the MQ put cannot be atomic. Realistic options:
+Option	Fits when	Trade-offs / unknowns
+Keep the service; fix the status protocol (claim + SNDNG age alert + retry of the idempotent PROC write)	Volume is modest and an at-most-once relay with reconciliation is acceptable	Lowest disruption; needs the SQL changes in SOM-I3/S1 and an operations runbook
+Keep the service, add an outbox/syncpoint discipline (MQ put and DB write coordinated, consumer de-duplicates on the folio)	Business requires effectively exactly-once delivery	More moving parts; requires an agreed MQMD contract with the SWIFT-gateway consumer (SOM-I7)
+Modern .NET Worker	Shared Framework-4.8 library (MUFG_T24) and the IBM client are available for the new runtime	Blocked while MUFG_T24 is Framework-only; benefit is hosting APIs, not correctness
+Scheduled job / SCM recovery	Messages are only needed at fixed times	Loses near-real-time hand-off; the window gate already behaves like a schedule
+Event/message-driven (database change feed or broker-native trigger)	A change-notification mechanism exists for the control table	Removes polling but adds infrastructure; the unbounded read (SOM-S1) disappears
+Serverless / microservice / full rewrite	A separate ownership, scale or isolation need exists	Highest cost; not justified by this code-quality review
+
+Sequence: fix definite defects (SOM-I1, B1, I2-I5, T1) -> make the build reproducible and add the first real tests -> remove duplication with the GCMS twin (SOM-D1, GEN-4) -> then evaluate hosting. Unknown and needed from the owners: SLAs and daily volume, the consumer of the MQ queue (persistence, ids, ordering, de-duplication), the real queue/channel definitions and certificate renewal process, the deployed SQL objects, the holiday/weekend policy and who receives MAIL_TO/MAIL_ERROR.
+6. JIRA-Ready Backlog
+IDs are stable. All statuses are Open. Each finding belongs to exactly one category.
+ID	Title	Category	Project	File(s)	Priority
+SOM-I1	Align status procedure name (code vs SQL project); add contract check and start-up preflight (GEN-13)	MustChange/rewrite	Infraestructura / SQL	ConstantesServicio.cs:19; RepositorioTomi.cs:361; SQL 002	P0 - Blocker
+SOM-B1	Replace absolute-path DLL references with packages (GEN-1)	MustChange/rewrite	All four	AplicacionSwfOUTMQ.csproj:55; InfraestructuraSwfOUTMQ.csproj:55,58; SwfOUTMQ.csproj:63; PruebasUnitarias.csproj:74	P0 - Blocker
+SOM-I2	Check Exito on the pending-operations read; use StoredProcedure command type and timeout (GEN-11)	MustChange/rewrite	Infraestructura	RepositorioTomi.cs:342-345; OperacionServicio.cs:73-79	P1 - Major
+SOM-I3	Atomic claim, retry of PROC, SNDNG reconciliation alert and runbook	MustChange/rewrite	Infraestructura / SQL	RepositorioTomi.cs:190-257	P1 - Major
+SOM-I4	Classify MQ reason codes; do not mark whole batch ERROR on channel faults	MustChange/rewrite	Infraestructura	RepositorioTomi.cs:238,247-252; MQErrorHandler.cs	P1 - Major
+SOM-I5	One alert/e-mail policy covering MQ, config and DB failures, rate-limited	MustChange/rewrite	Infraestructura / Aplicacion	RepositorioTomi.cs:49,83-93,281-303; OperacionServicio.cs:96-100,212-222	P1 - Major
+SOM-T1	Replace the non-runnable test class with real tests for gates, protocol and failures (GEN-2)	MustChange/rewrite	Tests	SwfOUTMQTest.cs:16-117	P1 - Major
+SOM-A1	Stop ERROR log + alert row per tick on holidays/out-of-hours (GEN-10)	rewrite_recommended	Aplicacion / host	OperacionServicio.cs:130-139,190-192; ServicHost.cs:82	P2 - Major
+SOM-A3	Propagate cancellation; finalize terminal marker with an independent token	rewrite_recommended	Aplicacion / Infra	OperacionServicio.cs:73,102-105,213; RepositorioTomi.cs:41,342	P2 - Major
+SOM-A4	Replace Task<bool> with a result enum; host acts on it	rewrite_recommended	Aplicacion / host	OperacionServicio.cs:65-100,221; ServicHost.cs:128	P2 - Major
+SOM-I6	Return per-batch results; quarantine poison rows; honest counters	rewrite_recommended	Infraestructura	RepositorioTomi.cs:74-81,190-257	P2 - Major
+SOM-I7	Set MQ persistence, folio identifier and quiescing options (agree contract)	rewrite_recommended	Infraestructura	RepositorioTomi.cs:70,238,263-270	P2 - Major
+SOM-I8	Split RepositorioTomi into DB, MQ publisher and notifier behind interfaces	rewrite_recommended	Infraestructura	RepositorioTomi.cs:41-324	P2 - Major
+SOM-H1	Check startup/shutdown marker results; truthful logs (GEN-9)	rewrite_recommended	Host / Aplicacion	ServicHost.cs:103,128,160,163-165; OperacionServicio.cs:104,115	P2 - Major
+SOM-S1	Claim/limit/uniqueness/row-count hardening of the SQL contract	rewrite_recommended	SQL (outside repo)	StoredProcedures ... SWF_OUT_MQ\IT24\Procedures 001-003	P2 - Major
+SOM-D1	Share code with the SWF_OUT_MQ_GCMS twin; retire SWF_OUT_TMP (GEN-4)	rewrite_recommended	Cross-solution	ServiceHost 93 %, RepositorioTomi 81 % overlap	P2 - Minor
+SOM-A2	Remove unreachable null/empty branches; request only needed parameters	rewrite_recommended	Aplicacion / Infra	OperacionServicio.cs:60-66,149-164; RepositorioTomi.cs:230-234,419-428	P3 - Minor
+SOM-I9	Typed exceptions, single log point, correct log labels	rewrite_recommended	Infraestructura	RepositorioTomi.cs:151,243-244,255,371,378	P3 - Minor
+SOM-A5	Gate before reading; drop unused system-date call; fewer per-tick logs	NiceToRewrite_ifTimePermits	Aplicacion	OperacionServicio.cs:73-93,113-119	P3 - Minor
+SOM-A6	Split/clean constants; fix typos; rename GuardaMensajesOutMQ; drop unused generic	NiceToRewrite_ifTimePermits	Aplicacion	ConstantesServicio.cs; IRepositorioTomi.cs	P3 - Minor
+SOM-I10	Fix MQErrorHandler (namespace, MQC constants, wrong 2540 text, missing codes)	NiceToRewrite_ifTimePermits	Infraestructura	MQErrorHandler.cs	P3 - Minor
+SOM-H2	Clean composition root (dead registration, magic number, duplicate catch, file name)	NiceToRewrite_ifTimePermits	Host	ServicHost.cs:32,50-51,82,105-114,131-134	P3 - Minor
+
+Counts: 22 findings = 7 MustChange/rewrite + 11 rewrite_recommended + 4 NiceToRewrite_ifTimePermits; priorities 2 Blocker, 13 Major, 7 Minor.
