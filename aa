@@ -1,6 +1,15 @@
-Dim match As Match = Regex.Match(mensaje, gsPatron_LIQ_MT210)
 
-Console.WriteLine("Regex válida: " & match.Success)
-Console.WriteLine("Longitud del patrón: " & gsPatron_LIQ_MT210.Length)
-Console.WriteLine("Patrón completo:")
-Console.WriteLine(gsPatron_LIQ_MT210)
+Debug.WriteLine("=== VALIDACION ORIGINAL ===")
+
+Debug.WriteLine("Longitud mensaje: " & mensaje.Length)
+
+Debug.WriteLine("Longitud regex: " &
+                gsPatron_LIQ_MT210.Length)
+
+Debug.WriteLine("Match: " &
+    System.Text.RegularExpressions.Regex.IsMatch(
+        mensaje, gsPatron_LIQ_MT210))
+
+Debug.WriteLine("CRLF: " &
+    System.Text.RegularExpressions.Regex.Matches(
+        mensaje, vbCrLf).Count)
