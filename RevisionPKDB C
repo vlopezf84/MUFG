@@ -1,0 +1,663 @@
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Servicios;
+using Infraestructura.Repositorio;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Encriptacion;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Infraestructura.Logging;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.ServiceProcess;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace SWF_OUT_PK_DB
+{
+    /// <summary>
+    /// Clase principal del servicio Windows (presentación).
+    /// </summary>
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        private Container _containerDI;
+        private ConfiguracionServicio _configuracionBase;
+
+        protected override string NombreServicioLog => NombreServicio.Swf_OUT_PK_DB.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 10000;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ServiceHost()
+        {
+        }
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del contenedor DI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<Alertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IAlertas>(() => _containerDI.GetInstance<Alertas>(), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+
+            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
+
+            _configuracionBase = new ConfiguracionServicio();
+
+            //Inicializa la obtención de la configuración general y el logging...
+            {
+                MUFG_T24.Core.Configuracion.LecturaConfguracionGeneral.Inicializar();
+                ServicioConfiguracionSettings servicioMainConfiguracion = MUFG_T24.Core.Configuracion.LecturaConfguracionGeneral.ObtenerServicio(NombreServicio.Swf_OUT_PK_DB.ToString());
+                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.RutaArchivoConfiguracion = $@"{EnumRutasGenerales.Path_Log_CMS}{NombreServicio.Swf_OUT_PK_DB.ToString()}\";
+                _configuracionBase.PathLog = servicioMainConfiguracion.Log + servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+                _configuracionBase.configuracion = servicioMainConfiguracion.configuracion;
+                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+                _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+
+                RutasConfiguracion rutas = new RutasConfiguracion()
+                {
+                    MUFG_Servicios_Path_Log = _configuracionBase.PathLog
+                };
+                Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+                Logging.Write("INFO|OnStart|Leyendo archivo de configuración.");
+            }
+
+            //Registra la configuracion...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
+
+            _containerDI.Register<ConfiguracionServicio>(() => (ConfiguracionServicio)_configuracionBase.Clone(), Lifestyle.Singleton);
+
+            #region Swf_OUT_PK_DB
+
+            _containerDI.Register<IParametrosOperaciones, ConsultaCamposBDTomi>(Lifestyle.Scoped);
+            _containerDI.Register<IOperacionesOUTPK, OperacionesOUTPK>(Lifestyle.Singleton);
+
+            #endregion Swf_OUT_PK_DB
+
+            _containerDI.Register<Aplicacion.Interfaces.IOperacionServicio, OperacionServicio>(Lifestyle.Scoped);
+
+            _containerDI.Verify();
+
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Obtiene el proceso actual...
+                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+
+                Configuracion configMufgT24 = new Configuracion();
+                Configuracion nuevaConfig = await _parametrizacion.ObtenerProcesoActualAsync(configMufgT24);
+                _configuracionBase.Pid = nuevaConfig.Pid;
+                _configuracionBase.NombreProceso = nuevaConfig.NombreProceso;
+                _configuracionBase.NombreDisplay = nuevaConfig.NombreDisplay;
+
+
+                //Marca el servicio en uso...
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct);
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ParametrizacionesAsync|{ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>   
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+
+            try
+            {
+                //Ejecuta el procedimiento principal del servicio...
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    var operacionServicio = _containerDI.GetInstance<Aplicacion.Interfaces.IOperacionServicio>();
+                    await operacionServicio.EjecutaProcedimientosAsync().ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Realiza_timer|Se presenta exception: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            Config.EscribirLog("INFO|OnStop|Finalizando Servicio.");
+
+            try
+            {
+                if (_containerDI == null || _configuracionBase == null)
+                {
+                    Config.EscribirLog("INFO|OnStop|Terminación omitida por inicialización incompleta.");
+                    return;
+                }
+
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
+                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+
+                    //Marca el servicio en uso...
+                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    //Marca el termino del servicio...
+                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                //Apagado normal
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|TerminacionAsync|{ex}");
+            }
+            finally
+            {
+                _containerDI?.Dispose();
+            }
+        }
+
+    }
+}
+
+**********************
+
+
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Servicios
+{
+    /// <summary>
+    /// Clase principal de operaciones servicios.
+    /// </summary>
+    public class OperacionServicio : Aplicacion.Interfaces.IOperacionServicio
+    {
+        // Sistema Interfaces.
+        private readonly ConfiguracionServicio _configuracion;
+       
+
+        // OUT_PK_DB Interfaces.
+        private readonly IParametrosOperaciones _IparametrosOperaciones;
+        private readonly IParametrizacion _iParametrizacion;
+        private readonly IOperacionesOUTPK _iOperacionesOUTPK;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        /// <param name="configuracion"></param>
+        /// <param name="iParametrizacion"></param>
+        /// <param name="iparametrosOperaciones"></param>
+        /// <param name="iOperacionesOUTPK"></param>
+        public OperacionServicio(ConfiguracionServicio configuracion, IParametrizacion iParametrizacion, IParametrosOperaciones iparametrosOperaciones, IOperacionesOUTPK iOperacionesOUTPK)
+        {
+            _configuracion = configuracion;
+            _IparametrosOperaciones = iparametrosOperaciones;
+            _iParametrizacion = iParametrizacion;
+            _iOperacionesOUTPK = iOperacionesOUTPK;
+        }
+
+
+
+        /// <summary>
+        /// Procedimiento principal para el procesamiento de las operaciones.
+        /// </summary>
+        public async Task EjecutaProcedimientosAsync()
+        {
+            // Actualiza ejecucion
+            await _IparametrosOperaciones.MarcarServicioEnEjecucion(_configuracion.NombreServicio);
+
+            // Obtiene los parametros del sistema del Servicio Entradas.
+            var dicParametrosSistema = await _IparametrosOperaciones.parametrosSistema();
+
+            // Obtiene la fecha de la base de datos.
+            _configuracion.fechaServicio = await _IparametrosOperaciones.ObtenerFechaSistemaAsync();
+            Config.EscribirLog($"INFO|Fecha actual de la base de datos: {_configuracion.fechaServicio}");
+
+            //Valida los horarios de operación...
+            TimeSpan timeHoraSistema = _iParametrizacion.ObtenerHoraSistema();
+
+            //Pregunta a la base de datos si el dia es habil segun el registro en base de datos.
+
+            _configuracion.EsDiaHabil = await _IparametrosOperaciones.BEsDiaHabil();
+
+            try
+            {
+                //Carga la configuración de los parámetros para el inicio de operaciones de la base de datos.
+
+                foreach (var paramSistema in dicParametrosSistema)
+                {
+                    if(!Enum.TryParse(paramSistema.Key, out ParametrosSistema parametro)) continue; // Cambia el tipo string a un enum
+                    switch (parametro)
+                    {
+                        case ParametrosSistema.HORA_OP_INICIO:
+                            if (paramSistema.Value == null) throw new Exception("No se especifica la hora de inicio de operaciones");
+                            _configuracion.StrHoraOperacionesInicio = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_INICIO.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de inicio de operaciones '" + paramSistema.Value + "'.", NombreServicio.Swf_OUT_PK_DB.ToString());
+                            break;
+
+                        case ParametrosSistema.HORA_OP_FIN:
+                            if (paramSistema.Value == null) throw new Exception("No se especifica la hora de finalización de operaciones");
+                            _configuracion.StrHoraOperacionesFin = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_FIN.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de finalización de operaciones '" + paramSistema.Value + "'.", NombreServicio.Swf_OUT_PK_DB.ToString());
+                            break;
+
+                        case ParametrosSistema.SWF_OUT_GET_MT_BATCH:
+                            int.TryParse(paramSistema.Value, out var valor);
+                            _configuracion.BoMensajesBatch = valor == 1;
+                            Config.EscribirLog($"INFO|obtenerParametrosSistema|Obtención de mensajes batch MT-9xx {_configuracion.BoMensajesBatch}.", NombreServicio.Swf_OUT_PK_DB.ToString());
+                            break;
+
+                    }
+                }
+
+                //Validamos el horario de las operaciones, indicara si la bandera es falso o verdadero. 
+                bool boHoraOperacionInicio = (timeHoraSistema >= _configuracion.StrHoraOperacionesInicio && timeHoraSistema <= _configuracion.StrHoraOperacionesFin);
+                Config.EscribirLog($"INFO|Ejecuta_Procedimientos|{(boHoraOperacionInicio ? "inicio" : "Termina")} horario de operaciones, HoraSistema='{timeHoraSistema:hh\\:mm}'.", NombreServicio.Swf_OUT_PK_DB.ToString());
+
+
+                // Obtencion de la fecha del sistema.
+                var horaActual = DateTime.Now;
+                _configuracion.StrFechaSistema = new TimeSpan(horaActual.Hour, horaActual.Minute, 0);
+
+                bool estaEnHorarioOperacion = _configuracion.StrFechaSistema >= _configuracion.StrHoraOperacionesInicio && _configuracion.StrFechaSistema <= _configuracion.StrHoraOperacionesFin;
+
+                if (estaEnHorarioOperacion) // Inicio Horario
+                {
+                    if (!_configuracion.BHorarioLectura)
+                    {
+                        _configuracion.BHorarioLectura = true;
+                        Config.EscribirLog($"INFO|Ejecuta_Procedimientos| Inicio horario de operaciones, HoraSistema='{timeHoraSistema:hh\\:mm}'.", NombreServicio.Swf_OUT_PK_DB.ToString());
+                    }
+                }
+                else // Termina Horario
+                {
+                    if (_configuracion.BHorarioLectura) 
+                    {   
+                        _configuracion.BHorarioLectura = false;
+                        Config.EscribirLog($"INFO|Ejecuta_Procedimientos| Termina horario de operaciones, HoraSistema='{timeHoraSistema:hh\\:mm}'.", NombreServicio.Swf_OUT_PK_DB.ToString());
+                    }
+                }
+
+                if (!estaEnHorarioOperacion) // Fuera de Horario
+                {
+                    Config.EscribirLog($"INFO|Ejecuta_Procedimientos| El Servicio esta fuera de Horario.", NombreServicio.Swf_OUT_PK_DB.ToString());
+
+                    await _IparametrosOperaciones.EnviaAlerta(new AlertaDTO
+                    {
+                        TipoOPeracion = null,
+                        Folio = null,
+                        Servicio = _configuracion.NombreServicio,
+                        ClaveAviso = ConstantesClaveAviso.Critico,
+                        Descipcion = "Error en ejecuta_procedimientos",
+                        PId = (int)_configuracion.Pid,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = new Exception("El servicio '" + _configuracion.NombreServicio + "' está fuera de horario.")
+                    });
+                    return;
+                }
+
+                //Inicia los servicios asincronos segun el horario de operacion de cada uno.
+
+            
+
+                    if ((bool)_configuracion.EsDiaHabil)  // Valido que sea día hábil
+                    {
+                        //Aqui empieza el servicio
+                        await _iOperacionesOUTPK.InsertaMensajesPKDB();
+                    }
+                    else
+                    {
+                        Config.EscribirLog($"ERROR|Ejecuta_Procedimientos| Hoy es un día inhábil.", NombreServicio.Swf_OUT_PK_DB.ToString());
+                    }
+
+
+            }
+            catch (Exception ex) 
+            {
+                Config.EscribirLog("ERROR|Ejecuta_Procedimientos|Se presenta exception: " + ex.Message);
+
+                await _IparametrosOperaciones.EnviaAlerta(new AlertaDTO
+                {
+                    TipoOPeracion = null,
+                    Folio = null,
+                    Servicio = _configuracion.NombreServicio,
+                    ClaveAviso = ConstantesClaveAviso.Critico,
+                    Descipcion = "Error en ejecuta_procedimientos",
+                    PId = (int)_configuracion.Pid,
+                    NombreProceso = _configuracion.NombreProceso,
+                    Exception = ex
+                });
+
+                
+                Config.EscribirLog("ERROR|Ejecuta_Procedimientos|Se forza la finalización del servicio.", NombreServicio.Swf_OUT_PK_DB.ToString());
+
+            }
+            finally
+            {
+                try
+                {
+                    // Fin de los procesos a realizar 
+                    await _IparametrosOperaciones.MarcarServicioEnFinalizacion(_configuracion.NombreServicio);
+                }
+                catch (Exception exFinally)
+                {
+                    Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|no fue posible maracar el servicio en finalización: {exFinally}", NombreServicio.SPID_Accionistas.ToString());
+                }
+            }
+        }
+    }
+}
+*****************
+
+using MUFG_T24.Modelos;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interface Parametros operaciones.
+    /// </summary>
+    public interface IParametrosOperaciones
+    {
+        Task<string> ObtenerFechaSistemaAsync();
+        Task<Dictionary<string, string>> parametrosSistema();
+        Task MarcarServicioEnEjecucion(string strNombreServicio);
+        Task MarcarServicioEnFinalizacion(string strNombreServicio);
+        Task EnviaAlerta(AlertaDTO alerta);
+
+        Task<bool> BEsDiaHabil();
+    }
+}
+
+*************************
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using Aplicacion;
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorio
+{
+    /// <summary>
+    /// Consulta campos tomi.
+    /// </summary>
+    public class ConsultaCamposBDTomi : RepositorioMaestro, IParametrosOperaciones
+    {
+        private readonly Alertas alerta;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ConsultaCamposBDTomi(Alertas alertas) : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null) 
+        {
+            alerta = alertas;
+        }
+
+        /// <summary>
+        /// Obtiene la fecha actual del sistema desde la base de datos.
+        /// </summary>
+        /// <returns>
+        /// Fecha del sistema en formato yyyyMMdd.
+        /// </returns>
+        public async Task<string> ObtenerFechaSistemaAsync()
+        {
+            var resultado = await EjecutarStoredProcedureQuery<SFecha>(ConstantesServicio.sp_Fecha_Sistema);
+            return resultado?.Data?.FirstOrDefault()?.fecha.ToString("yyyyMMdd");
+        }
+
+        /// <summary>
+        /// Obtiene los parámetros del sistema desde la base de datos.
+        /// </summary>
+        /// <returns>
+        /// Diccionario con los parámetros configurados.
+        /// </returns>
+        public async Task<Dictionary<string, string>> parametrosSistema()
+        {
+            var result = await EjecutarStoredProcedureQuery<ParametroModelo>(ConstantesServicio.sp_Parametros_Sistema);
+
+            if (result?.Data == null) return new Dictionary<string, string>();
+
+            return result.Data
+                .Where(x => x != null && !string.IsNullOrWhiteSpace(x.id_parametro))
+                .GroupBy(x => x.id_parametro)
+                .ToDictionary(
+                    x => x.Key,
+                    x => x.LastOrDefault()?.valor ?? string.Empty
+                );
+
+        }
+
+        /// <summary>
+        /// Actualiza el estado del servicio en la base de datos marcándolo como en ejecución.
+        /// </summary>
+        /// <param name="strNombreServicio">Nombre del servicio.</param>
+        /// <returns>Una tarea asíncrona.</returns>
+        public async Task MarcarServicioEnEjecucion(string strNombreServicio) =>  await ActualizaEJecucion(strNombreServicio);
+
+        // <summary>
+        /// Envia alertas al sistema.
+        /// </summary>
+        /// <returns></returns>
+        public async Task EnviaAlerta(AlertaDTO alertaDTO) => await alerta.InsertarAlerta(alertaDTO);
+
+        /// <summary>
+        /// Actualiza el estado del servicio en la base de datos marcándolo como finalizado.
+        /// </summary>
+        public async Task MarcarServicioEnFinalizacion(string strNombreServicio) => await ActualizaTerminacion(strNombreServicio);
+
+        /// <summary>
+        /// Pregunta si es dia habil para ejecutar el sistema.
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> BEsDiaHabil() => await EsDiaHabil();
+
+    }
+}
+
+*****************
+using Aplicacion.DTOs;
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Repositorio
+{
+    /// <summary>
+    /// Operaciones OUTPK.
+    /// </summary>
+    public class OperacionesOUTPK : RepositorioMaestro, IOperacionesOUTPK
+    {
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public OperacionesOUTPK() : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null) 
+        {
+        }
+
+        private bool _writeLog = true;
+        private int _idxNoLog = 0;
+
+        /// <summary>
+        /// Busca las operaciones proximas a insertar en PK_DB
+        /// </summary>
+        /// <returns></returns>
+        public async Task InsertaMensajesPKDB()
+        {
+            try
+            {
+                var operaciones = await BuscarOperacionesInsertar();
+
+                if (operaciones.Any())
+                {
+                    foreach (DOperaciones operacion in operaciones)
+                    {
+                        try
+                        {
+                            Config.EscribirLog($"INFO|InsertaMensajesPKDB| *** Inicio analisis de folio: {operacion.Folio}, tipo operacion: {operacion.TipoOperacion}", NombreServicio.Swf_OUT_PK_DB.ToString());
+                            Config.EscribirLog($"INFO|InsertaMensajesPKDB| A colocar el mensaje en el PK_DB", NombreServicio.Swf_OUT_PK_DB.ToString());
+
+                            await InsertarOperacionPKDB(operacion.Folio, operacion.TipoOperacion);
+
+                            Config.EscribirLog($"INFO|InsertaMensajesPKDB| Proceso terminado", NombreServicio.Swf_OUT_PK_DB.ToString());
+                        } 
+                        catch (Exception ex)
+                        {
+                            Config.EscribirLog($"ERROR|Interpreta_MensajesPKDB| {ex}", NombreServicio.Swf_OUT_PK_DB.ToString());
+                        }
+                    }
+                    Config.EscribirLog($"INFO|InsertaMensajesPKDB| Termina conexión", NombreServicio.Swf_OUT_PK_DB.ToString());
+                }
+
+                _idxNoLog += 1;
+
+                if (_idxNoLog >= 24) _writeLog = true;
+                if (_writeLog)
+                {
+                    Config.EscribirLog($"INFO|InsertaMensajesPKDB| Se insertaron {operaciones.Count} operaciones.", NombreServicio.Swf_OUT_PK_DB.ToString());
+                    _writeLog = false;
+                    _idxNoLog = 0;
+                }
+
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|InsertaMensajesPKDB| {ex}", NombreServicio.Swf_OUT_PK_DB.ToString());
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Busca operaciones a insertar.
+        /// </summary>
+        /// <returns></returns>
+        private async Task<IReadOnlyList<DOperaciones>> BuscarOperacionesInsertar() 
+        {
+            var resultado = await EjecutarStoredProcedureQuery<DOperaciones>(ConstantesServicio.sp_BuscarOperacionesInsertarSWFOUTPKDB, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipoOperacion", ConstantesServicio.TipoOperacion));
+            });
+           return resultado?.Data?.ToList() ?? new List<DOperaciones>();
+        }
+
+        /// <summary>
+        /// Inserta operacion en PK DB.
+        /// </summary>
+        /// <param name="icn"></param>
+        /// <param name="tipoOperacion"></param>
+        /// <returns></returns>
+        private async Task InsertarOperacionPKDB(string icn, string tipoOperacion)
+        {
+            Config.EscribirLog($"INFO|termina_operacion_swf|A aceptar la operacion con folio: {icn}.", NombreServicio.Swf_OUT_PK_DB.ToString());
+
+            var resultado = await EjecutarStoredProcedureQuery<DOperaciones>(ConstantesServicio.usp_swf_inserta_pk_db, cmd =>
+            {
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@icn", icn));
+                cmd.Parameters.Add(basedatosConexion.CrearParametro("@tipo_operacion", tipoOperacion));
+            });
+
+            if (resultado != null && !resultado.Exito) throw new Exception($"ERROR|InsertarOperacionPKDB| {resultado.MensajeError}");
+        }
+    }
+}
+*******************************
+namespace Aplicacion.Enums
+{
+    /// <summary>
+    /// Constate servicio.
+    /// </summary>
+    public static class ConstantesServicio
+    {
+        #region Store Procedures Base
+            public const string sp_Fecha_Sistema = "usp_ObtenerFechaSistema";
+            public const string sp_Parametros_Sistema = "usp_ObtenerParametrosSistemaSWFOUTPKDB";
+            public const string sp_Es_Dia_Habil = "usp_EsDiaHabil";
+        #endregion
+
+        #region Store Procedures SWF_OUT_PK_DB
+        public const string sp_BuscarOperacionesInsertarSWFOUTPKDB = "sp_BuscarOperacionesInsertarSWFOUTPKDB";
+        public const string usp_swf_inserta_pk_db = "usp_swf_inserta_pk_db";
+        #endregion
+
+
+        public const string TipoOperacion = "SWIFT_OUT";
+        public const string CorreoOrigen = "btmumexicocms@mx.mufg.jp";
+        public const string NombreOrigen = "CMS Servicios";
+    }
+}
+**************
+USE [InterfacesT24]
+GO
+/****** Object:  StoredProcedure [dbo].[usp_SWF_INSERTA_PK_DB]    Script Date: 10/27/2026 1:37:58 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[usp_SWF_INSERTA_PK_DB]
+ @icn				VARCHAR(25),
+ @tipo_operacion	VARCHAR(10)
+AS
+BEGIN
+ -- Alta en base PK
+ INSERT INTO tb_srv_swf_swift_out_ctl (folio, tipo_operacion, cve_estatus, fec_adicion)
+  VALUES (@icn, @tipo_operacion, 'INI', GetDate());
+ -- Actualización del maestro
+ UPDATE tb_srv_swf_plan_trabajo_maestro SET cve_estatus='MQ',flg_con_error=0,fec_fin=getDate() WHERE tipo_operacion=@tipo_operacion AND folio=@icn AND cve_estatus='AUT';
+ UPDATE tb_srv_swf_plan_trabajo_detalle SET flg_terminado=1,flg_con_error=0,fec_fin=getDate(),fec_inicio=ISNULL(fec_inicio,getDate()) WHERE tipo_operacion=@tipo_operacion AND folio=@icn AND flg_terminado=0;
+END
