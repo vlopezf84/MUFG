@@ -1,26 +1,100 @@
-{1:F01BOTKMXMXAXXX0000000000}{2:I210CHASUS33XXXXN2020}{3:{108:MT210}}{4:
-:20:3067506
-:25:919286130
-:30:261027
-:21:3067505
-:22:FXFORWARD
-:23:1230
-:24:DEBIT ACCOUNT/6002127
-:32B:CNH60000,
-:52A:/97770030
-BOTKUS33
--}{5:}
 
+Imports System
+Imports System.Data
+Imports System.Text
+Imports System.Text.RegularExpressions
+Imports Microsoft.Data.SqlClient
 
-{1:F01BOTKMXMXAXXX0000000000}{2:I210CHASUS33XXXXN2020}{3:{108:MT210}}{4:
-:20:3017002
-:25:919286166
-:30:260702
-:21:3017001
-:22:FXFORWARD
-:23:1230
-:24:DEBIT ACCOUNT/5990180
-:32B:USD5254068,
-:52A:/97770027
-BOTKUS33
--}{5:}
+Module Program
+
+    Sub Main()
+
+        Dim servidor As String = "x"
+        Dim usuario As String = "y"
+        Dim password As String = "psw"
+        Dim baseDatos As String = "NOMBRE_BD"
+
+        ' Sustituir por la columna que contiene el SWIFT
+        Dim columnaSwift As String = "NOMBRE_COLUMNA"
+
+        Dim conexion As String =
+            $"Server={servidor};Database={baseDatos};" &
+            $"User Id={usuario};Password={password};" &
+            "Encrypt=True;TrustServerCertificate=True;"
+
+        Dim mensaje As String = Nothing
+
+        Try
+            Using cn As New SqlConnection(conexion)
+
+                cn.Open()
+
+                Dim sql As String =
+                    $"SELECT [{columnaSwift}] " &
+                    "FROM dbo.tbl_calypso_intercambio " &
+                    "WHERE id_envio = @id"
+
+                Using cmd As New SqlCommand(sql, cn)
+
+                    cmd.Parameters.Add("@id", SqlDbType.Int).Value = 1626895
+
+                    Dim valor As Object = cmd.ExecuteScalar()
+
+                    If valor Is Nothing OrElse valor Is DBNull.Value Then
+                        Console.WriteLine("Registro no encontrado o mensaje NULL.")
+                        Return
+                    End If
+
+                    mensaje = Convert.ToString(valor)
+
+                End Using
+            End Using
+
+            Console.WriteLine("=== DIAGNÓSTICO SWIFT ===")
+            Console.WriteLine("ID: 1626895")
+            Console.WriteLine("Longitud: " & mensaje.Length)
+
+            Console.WriteLine("Primer carácter: " &
+                AscW(mensaje(0)).ToString("X4"))
+
+            Console.WriteLine("Último carácter: " &
+                AscW(mensaje(mensaje.Length - 1)).ToString("X4"))
+
+            Console.WriteLine("CRLF: " &
+                Regex.Matches(mensaje, vbCrLf).Count)
+
+            Console.WriteLine("LF individuales: " &
+                Regex.Matches(mensaje, "(?<!\r)\n").Count)
+
+            Console.WriteLine("CR individuales: " &
+                Regex.Matches(mensaje, "\r(?!\n)").Count)
+
+            Console.WriteLine()
+            Console.WriteLine("=== CARACTERES POR POSICIÓN ===")
+
+            For i As Integer = 0 To mensaje.Length - 1
+
+                Dim caracter As Char = mensaje(i)
+                Dim codigo As Integer = Convert.ToInt32(caracter)
+
+                Dim representacion As String =
+                    If(Char.IsControl(caracter),
+                       "[CONTROL]",
+                       caracter.ToString())
+
+                Console.WriteLine(
+                    $"{i:0000} | U+{codigo:X4} | {representacion}")
+
+            Next
+
+        Catch ex As Exception
+            Console.WriteLine("ERROR: " & ex.Message)
+        End Try
+
+        Console.WriteLine()
+        Console.WriteLine("Presiona ENTER para salir.")
+        Console.ReadLine()
+
+    End Sub
+
+End Module
