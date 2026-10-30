@@ -1,0 +1,335 @@
+Swf IN ControladorServiciosMQ Recommendations
+Swf_IN_ControladorServiciosMQ - Architecture & Code Quality Recommendations
+Solution: Swf_IN_ControladorServiciosMQ.sln (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ.sln). Reviewed: 2026-10-15, branch CodeReview, commit 9fd1f2f4451499557cab0414c0303fbd761fd182. Compared against: LoansApp coding-practices baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR review/severity checklist (../BaseLine_Docs/code_review.md). See also: orchestration/control (./_ORCHESTRATION.md#swf_in_controladorserviciosmq-scoped-audit-checkpoint---2026-10-15). Target: .NET Framework 4.8 / x86 Windows Service; focus: all categories; severity threshold: all. Audit only: no application fixes applied.
+1. Solution Overview (low/no-dependency -> high dependency)
+Tier	Project	Kind	Path
+0	Aplicacion	Class library (schedule decision + SCM control)	Aplicacion.csproj (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Aplicacion.csproj)
+1	Infraestructura	Class library (TOMI repository)	Infraestructura.csproj (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Infraestructura.csproj)
+2	PruebasUnitarias	MSTest library (7 tests)	PruebasUnitarias.csproj (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/PruebasUnitarias.csproj)
+2	Swf_IN_ControladorServiciosMQ	Windows Service executable (composition root)	Swf_IN_ControladorServiciosMQ.csproj (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ.csproj)
+
+What this solution actually does: it is a local supervisor Windows Service for the two SWIFT *incoming* MQ workers. Every timer tick (interval from the external service configuration, 10 s fallback) it reads the current system date and 14 weekday start/end parameters (HORA_OP_SWF_LU_INI ... HORA_OP_SWF_DO_FIN) from TOMI, asks the shared library whether today is a business day, compares the machine's local time (truncated to the minute) with today's window, and then, in parallel, starts the Windows services CMS-Swf_IN_MQ and CMS-Swf_IN_MQ_MX when it is a business day inside the window, or stops them otherwise. Each start/stop uses ServiceController on the local machine and waits up to 30 s. Control failures are logged and written as TOMI alert rows. At the end of every tick it marks the controller's row as terminated in TOMI. It does not read, parse or route SWIFT messages and does not move funds; it is an availability dependency for the two incoming-message services.
+1.1 Issue Summary
+Recommended priority	Count	Simple meaning
+Blocker	1	Close before approving a release; the solution cannot be built reproducibly
+Major	11	Correct or explicitly accept before relying on the controller; planned reliability work
+Minor	8	Maintainability/cleanup after correctness work
+Total distinct findings	20	One category per finding; no duplicate tickets
+
+Skill category	Count
+MustChange/rewrite	5
+rewrite_recommended	12
+NiceToRewrite_ifTimePermits	3
+
+Priorities are source-review release recommendations, not CVSS or proof of a production incident. No credential, cryptography, SQL-injection, sync-over-async or throw ex; defect was found in the authored code (see 2.1).
+2. Scope & Methodology Note
+Area	Evidence / limitation
+Source scope	30/30 authored tracked text files, 2,611/2,611 physical lines fully read, not sampled: 13 first-party C# files + 5 AssemblyInfo/Designer files (18 C# / 1,528 lines), four project files, one solution, two packages.config, App.config, README.md, .gitignore (485 lines, read as rule list), two IDE cache JSON files
+Coverage record	SHA-256 / physical-line manifest (./_Swf_IN_ControladorServiciosMQ_FileManifest.csv); every authored file has Reviewed range 1-N
+Context also read in full	Five SQL objects for this solution under StoredProcedures\MWD_DB\DBMDW\SWIFT\Incoming\SWF_IN_ControladorServiciosMQ, and the relevant parts of shared MUFG_T24 source (WindowsServiceHostBase, ControlServicio, RepositorioMaestro.EsDiaHabil/ActualizaTerminacion, Configuracion, ConversionHelper.ParseTimeSpanRequerido, StoredProcedureResult). Shared-library defects are out of scope; they are used only to confirm or rule out local findings
+Exclusions	Git internals, 398 tracked restored-package binaries under Swf_IN_ControladorServiciosMQ\packages (vendor files, not authored; see SICM-H4), generated bin/obj output (none on disk)
+Review basis	Full current-source audit, not a changed-lines PR verdict or acceptance review for an unspecified work item
+Standards limitation	Baseline has blank inventory/evidence fields; its principles are criteria, not measured facts
+Build	Not built. D:\ServiceCMS does not exist on this machine, so MUFG_T24.dll / SimpleInjector.dll are unavailable; msbuild/dotnet/nuget are not on PATH
+Tests	Seven real MSTest methods exist (7 Assert calls, hand-written fakes). They were reviewed, not executed; no coverage was measured
+Safe execution	Isolated PowerShell/.NET probes (see 2.2) characterize TimeSpan parsing, window comparison, the log label and the steady-state outcome. They are not production-source unit tests
+External evidence not used	No configuration file with the real service names/intervals, no live TOMI database, no SCM access, no deployed DLL versions, no secrets accessed; no package restore
+Fix examples	Illustrative contracts, not compiled patches. New helper types need implementation, DI registration and regression tests
+
+Full-read batches in this audit (single session, 2026-10-15):
+Batch	Contents	Files	Physical lines	Status
+A	Aplicacion: OperacionServicio, ControladorServicios, 3 interfaces, enums, models, csproj, AssemblyInfo, .vs cache	12	755	Full read complete
+B	Infraestructura: RepositorioTomi, csproj, AssemblyInfo, .vs cache	4	380	Full read complete
+C	Host: ServiceHost (+Designer), Program, App.config, csproj, sln, packages.config, AssemblyInfo	8	534	Full read complete
+D	Tests: UnitTest1.cs, csproj, packages.config, AssemblyInfo	4	364	Full read complete
+E	Root: README.md, .gitignore	2	578	Full read complete
+Total	Entire authored scope	30	2,611	No pending range
+
+2.1 Quantified Cross-Checks and Duplication
+Check	Count	Meaning
+case Enums.ParametrosSistema.* blocks	14	Same parse + log body, one per weekday bound (OperacionServicio.cs:46-121)
+"Hora de inicio de operaciones" log lines	14	7 of them are the END parameters and are mislabeled (SICM-A9)
+Presence checks IsNullOrEmpty(...ToString())	14	7 repeated two-term guards (147-168)
+DateTime.Now.DayOfWeek blocks	7	Identical 7-way if chain (183-216), plus one more DateTime.Now at 144
+new AlertaDTO construction blocks	2	Identical except text (ControladorServicios.cs:58-69, 99-110)
+throw new Exception( in RepositorioTomi	7	Generic exception after a log, inside 8 catch blocks that log again (SICM-I3)
+Line overlap with sibling SWF_IN_ControladorServicios	79% / 89% / 97%	OperacionServicio / ControladorServicios / RepositorioTomi non-blank lines also present in that sibling (GEN-4)
+.Result, .Wait(, GetAwaiter().GetResult()	0	No sync-over-async in authored code
+throw ex;, DES/3DES/ECB/MD5/SHA1, System.Random, secrets in logs	0	Not present
+[TestMethod] / Assert.	7 / 7	Real but shallow (SICM-A4)
+First-party use of Microsoft.Extensions.* / System.Text.Json	0	Yet 19 NuGet packages (13 of them at version 10.0.3, on net48) are restored in the host (SICM-H2)
+
+Scans supplement, not replace, the full read.
+Sibling comparison (fresh review, same day): Swf_IN_ControladorServicios_Recommendations.md (./Swf_IN_ControladorServicios_Recommendations.md) (SIC-FR-1..22) covers the near-identical ETL/FT supervisor. This solution already checks the SCM status before acting, so it does not have that sibling's per-tick exception/alert storm (SIC-FR-2) or inverted predicates (SIC-FR-1); instead the same "idempotent" intent surfaces as the tri-state outcome gap (SICM-A1) and the pending-state gap (SICM-A2). Shared-family items reconfirmed here: unused per-tick date call (SIC-FR-10 / SICM-A6), !Exito predicate (SIC-FR-13 / SICM-I1), discarded MarcarPuertoEnUsoAsync result (SIC-FR-16 / SICM-H1), DI clean-ups (SIC-FR-17 / SICM-H3), tracked packages/ (SIC-FR-21 / SICM-H4) and the HintPath defect (SIC-FR-20 / SICM-H2).
+2.2 Safe Probe Results
+Probe	Observed
+TimeSpan.TryParse(v, InvariantCulture) (what ParseTimeSpanRequerido uses)	'07:00', '23:59' ok; '8' -> 8.00:00:00 (8 days); '7' -> 7 days; '1.07:00' -> 1 day 7 h; '24:00' rejected
+Window test now >= INI && now <= FIN	07:00-19:00 @12:00 true; FIN inclusive @19:00 true; overnight 22:00-06:00 false at 23:30 and 02:00; both bounds 00:00 @10:00 false
+Nullable guard	Nullable<TimeSpan>.ToString() is "" when null, so the IsNullOrEmpty guard *does* catch a missing parameter (ruled out as a defect)
+Log label (line 218)	Renders iniciohorario de operaciones / Terminahorario de operaciones (no space)
+Steady state	Already-running + start requested -> IniciaServicioAsync returns false; Task.WhenAll = [False,False] -> Any(x => !x) true -> ERROR log. At 10 s: 360 ERROR lines/hour
+Weekend gate	Shared EsDiaHabil returns false on Sat/Sun unless FORZA_EJECUCION_SERVICIOS=1; HORA_OP_SWF_SA_*/DO_* can never start the services
+
+3. What's Already Good
+• Layering and DI: IOperacionServicio, IControladorServicios, IRepositorioTomi interfaces with constructor injection
+(OperacionServicio.cs:24-29 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L24), ControladorServicios.cs:25-29 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L25)); SimpleInjector composition root with Verify() (ServiceHost.cs:96 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/ServiceHost.cs#L96)).
+• Per-tick configuration isolation: ConfiguracionServicio is MemberwiseCloned into every async scope
+(ServiceHost.cs:90 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/ServiceHost.cs#L90)); schedule parameters are re-read from TOMI every tick, so operators can change hours without restarting the service. Pid.Value at ServiceHost.cs:118 was ruled out as an unguarded nullable: shared Parametrizacion rejects a missing PID before the call.
+• Overlap protection: the shared host serializes ticks with SemaphoreSlim(1,1) (WindowsServiceHostBase.cs:21,363-372), so two ticks cannot start/stop services concurrently.
+• Resource handling: ServiceController is wrapped in using, blocking SCM waits run off the caller via Task.Run, and each wait is bounded (30 s) (ControladorServicios.cs:39-52 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L39)).
+• Termination bookkeeping: finally always attempts ProcesoActualizaTerminacion; rethrows use throw; (stack preserved) - no throw ex; anywhere.
+• Fail-closed schedule validation: all 14 parameters are required and parsed through a helper that names the offending field (OperacionServicio.cs:50-121,147-168 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L147)).
+• Data access: repository calls stored procedures with typed parameters; no string-built SQL. The five SQL objects use SET NOCOUNT ON, and the two writers use TRY/CATCH, explicit transactions, XACT_ABORT ON and an error-log insert.
+• No secrets, crypto or cleartext credentials appear in code, config or logs; App.config only pins the runtime.
+• Tests exist (seven MSTest methods with hand-written fakes and a temp-folder log path) - a better starting point than the zero-test solutions tracked under GEN-2.
+4. Findings by Project (low/no-dependency -> high dependency)
+Every finding was verified against the current source. Locations use file:line from the manifest snapshot. Each ID is stable for JIRA.
+4.1 Aplicacion - Tier 0
+MustChange / Rewrite
+SICM-A1 - "Already in the desired state" is reported as a failure on every tick
+Severity: Major (P1). Category: MustChange/rewrite. Checklist: error handling / observability. Locations: ControladorServicios.cs:42-70 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L42), ControladorServicios.cs:84-111 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L84), OperacionServicio.cs:233-238 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L233).
+Code block (csharp)
+if (serviceController.Status != ServiceControllerStatus.Running)
+{
+    ... serviceController.Start(); ...
+    return true;
+}
+// already running: falls out of the using block
+...
+return false;            // line 70: same value as a real failure
+ 
+bool[] resultados = await Task.WhenAll(tareas);
+if (resultados.Any(x => !x))
+    Config.EscribirLog("ERROR|Ejecuta_Procedimientos|No todos los servicios pudieron procesarse.", ...);
+true means only "I issued a Start/Stop"; false means both "nothing to do" and "failed". During the whole in-window period the services are already running, so both calls return false and an ERROR line is written every tick (probe: 360 per hour at the 10 s fallback). The two real failures (SCM exception, alert-insert failure) are indistinguishable from this noise, and ERROR-level log scrapers will page on a healthy system. The unit-test fake always returns true (UnitTest1.cs:245,253 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/UnitTest1.cs#L245)), so no test can see it.
+Code block (csharp)
+public enum ResultadoTransicion { SinCambio, Aplicada, Fallida }
+Task<ResultadoTransicion> IniciaServicioAsync(string nombre, CancellationToken ct);
+ 
+if (resultados.Any(x => x == ResultadoTransicion.Fallida))
+    Config.EscribirLog("ERROR|...|Al menos un servicio no pudo procesarse.", _configuracion.NombreServicio);
+Fix/benefit: a three-state outcome makes ERROR mean failure again and lets tests assert start vs stop vs no-op. Confirm no downstream alerting depends on the current noise. Suggested JIRA: SICM-A1 (P1).
+SICM-A2 - Pending and paused SCM states are not handled
+Severity: Major (P1). Category: MustChange/rewrite. Checklist: error handling. Locations: ControladorServicios.cs:42 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L42), :84 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L84).
+Code block (csharp)
+if (serviceController.Status != ServiceControllerStatus.Running)      // Start path
+    serviceController.Start();
+if (Status != Stopped && Status != StopPending)                       // Stop path
+    serviceController.Stop();
+Start is attempted for every status other than Running, including StartPending, ContinuePending, PausePending, Paused and StopPending. ServiceController.Start() on a service that is not stopped raises InvalidOperationException (documented behavior; not exercised here - verify in a controlled environment). The catch then logs an ERROR and inserts a TOMI alert row on every tick until the state settles (GEN-10 pattern). The Stop path likewise issues Stop() while the service is StartPending/Paused without a defined policy.
+Code block (csharp)
+switch (sc.Status)
+{
+    case Running: return ResultadoTransicion.SinCambio;
+    case StartPending: sc.WaitForStatus(Running, timeout); return ResultadoTransicion.Aplicada;
+    case StopPending: return ResultadoTransicion.SinCambio;   // retry on next tick
+    case Paused: sc.Continue(); sc.WaitForStatus(Running, timeout); return ResultadoTransicion.Aplicada;
+    default: sc.Start(); sc.WaitForStatus(Running, timeout); return ResultadoTransicion.Aplicada;
+}
+Fix/benefit: explicit per-status policy removes tick-by-tick alert spam and makes restarts deterministic. Test each status with an IServiceControl abstraction (see SICM-A8). Suggested JIRA: SICM-A2 (P1).
+SICM-A3 - Schedule parameters are only checked for presence, not for a valid time-of-day
+Severity: Major (P1). Category: MustChange/rewrite. Checklist: input validation. Location: OperacionServicio.cs:147-168 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L147) (14 parser calls at 46-121).
+Code block (csharp)
+if (string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_LU_INI.ToString())
+    || string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_LU_FIN.ToString())) MensajeThrow("...LUNES");
+ParseTimeSpanRequerido uses TimeSpan.TryParse with the invariant culture. Probe results: '8' becomes 8 days, '1.07:00' becomes 1 day 7 h, negative values are accepted, and '24:00' is rejected. The guard only proves the nullable has a value, so a stored 8 (operator meaning 08:00) yields a bound that can never match a time-of-day: the controller silently stops both services all day. Nothing compares INI with FIN (SICM-A5) and all seven weekdays are required even though only today's pair is used, so one bad Tuesday value halts supervision on every other day too (fail-closed by design or accident - owner decision).
+Code block (csharp)
+private static bool EsHoraDelDia(TimeSpan? v) => v.HasValue && v.Value >= TimeSpan.Zero && v.Value < TimeSpan.FromDays(1);
+if (!EsHoraDelDia(ini) || !EsHoraDelDia(fin))
+    MensajeThrow($"Horario invalido para {dia}: INI='{ini}', FIN='{fin}'. Se espera 00:00-23:59.");
+Fix/benefit: reject malformed values with a parameter-specific message *before* any SCM action. Test null, negative, 0, 23:59:59, 24:00, multi-day and bare-integer values. Do not silently reinterpret 24:00; confirm the end-of-day convention (the same defect family appears in CEP_ControladorServicios, CEP-A1). Suggested JIRA: SICM-A3 (P1).
+Rewrite Recommended
+SICM-A4 - Test suite is real but cannot detect inverted or failed decisions
+Severity: Major (P2). Category: rewrite_recommended. Checklist: tests (GEN-2 variant). Location: UnitTest1.cs:55-130 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/UnitTest1.cs#L55).
+Seven [TestMethod]s, each with one Assert. Two of them (:62 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/UnitTest1.cs#L62) and :74 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/UnitTest1.cs#L74)) assert only TotalOperaciones == 2 for both "business day" and "not a business day", so a controller that starts when it should stop passes. The failure test is named ..._NoDebeLanzarExcepcion but asserts only that parameters were queried once. The fakes always return true (hides SICM-A1) and the schedule is 00:00-23:59 for all days, so boundary, overnight, weekday-specific and missing-parameter behavior is never exercised. Nothing covers ControladorServicios, RepositorioTomi or ServiceHost. The tests read DateTime.Now through production code, and the project cannot build without D:\ServiceCMS\MUFG_T24.dll. Existing coverage is therefore *not* zero (do not report 0 %), but it does not protect the critical decisions.
+Code block (csharp)
+Assert.AreEqual(1, _controlador.IniciaServicioCount); Assert.AreEqual(0, _controlador.DetieneServicioCount);   // business day, in window
+Assert.AreEqual(0, _controlador.IniciaServicioCount); Assert.AreEqual(2, _controlador.DetieneServicioCount);   // holiday
+Fix/benefit: inject a clock and an IServiceControl; table-drive 7 weekdays x {before, start, inside, end, after} x {business day, holiday}; script failing/no-op fakes; assert which service names were started/stopped. Suggested JIRA: SICM-A4 (P2).
+SICM-A5 - Schedule contract: overnight windows and weekend parameters are inert
+Severity: Major (P2). Category: rewrite_recommended. Locations: OperacionServicio.cs:183-216 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L183), :220 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L220).
+Code block (csharp)
+EnHorarioOperaciones = (hora >= HORA_OP_SWF_SA_INI && hora <= HORA_OP_SWF_SA_FIN);
+bool bolPuedeIniciar = _configuracion.BoEsDiaHabil && _configuracion.EnHorarioOperaciones;
+(a) An overnight window (INI > FIN, e.g. 22:00-06:00) is never true (probe: false at 23:30 and 02:00), so such a configuration silently keeps the services stopped. (b) BoEsDiaHabil comes from shared EsDiaHabil, which returns false on Saturday/Sunday unless the setting FORZA_EJECUCION_SERVICIOS is 1 (RepositorioMaestro.cs:1252,1260). The code nevertheless requires and logs HORA_OP_SWF_SA_* and HORA_OP_SWF_DO_*; they can never start anything on their own. Whether weekends are meant to be off (SWIFT is largely Monday-Friday) is a business decision; the code, parameters and SQL should then agree.
+Fix/benefit: document and encode the contract: either reject INI >= FIN / support wrap-around explicitly, and either drop the SA/DO parameters or let them participate (a weekday-aware business calendar). Suggested JIRA: SICM-A5 (P2). *Needs owner decision before changing behavior.*
+SICM-A6 - A per-tick database date is fetched, never used, and can block control
+Severity: Major (P2). Category: rewrite_recommended. Locations: OperacionServicio.cs:136 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L136), RepositorioTomi.cs:110-136 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Servicio/RepositorioTomi.cs#L110), ConfiguracionServicio.cs:12 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Modelos/ConfiguracionServicio.cs#L12).
+Code block (csharp)
+_configuracion.StrFechaSistemaTomi = await _repositorioTomi.ObtenerFechaSistema();   // only reference to the property
+StrFechaSistemaTomi is assigned and never read (two hits in the whole solution). Yet ObtenerFechaSistema throws when the procedure returns zero rows, and usp_ObtenerFechaSistema returns rows only for cerrado = 0 AND nextday = 1 AND openday = 1 (005 SP usp_ObtenerFechaSistema.sql). If TOMI has no such row (for example during day-end processing - operational behavior unverified) the tick aborts before any start/stop decision. The unit test ..._DebeConsultarFechaSistema enshrines the dead call.
+Fix/benefit: delete the call (one DB round-trip per tick less) or use the TOMI business date as the single authority for weekday and holiday decisions (SICM-A10). Suggested JIRA: SICM-A6 (P2).
+SICM-A7 - Configuration/database failures are logged thinly, not alerted, and the log message is untrue
+Severity: Major (P2). Category: rewrite_recommended. Location: OperacionServicio.cs:244-260 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L244).
+Code block (csharp)
+catch (Exception ex)
+{
+    Config.EscribirLog("ERROR|Ejecuta_Procedimientos|Se presenta exception: " + ex.Message, ...);
+    Config.EscribirLog("ERROR|Ejecuta_Procedimientos|Se forza la finalización del servicio.", ...);
+}
+Only ex.Message is logged (no type or stack), no TOMI alert row is written (unlike SCM failures), and the second line claims the service is being forced to finish while the method simply returns and the next tick runs. The finally then marks termination and may rethrow (line 259), which the host logs as a *second* error. Missing parameters, malformed values and DB outages therefore produce no operator-visible alert, while SCM errors produce one per tick.
+Code block (csharp)
+catch (Exception ex)
+{
+    Config.EscribirLog($"ERROR|Ejecuta_Procedimientos|{ex}", _configuracion.NombreServicio);
+    await IntentarAlertaAsync("Error al evaluar horario de operaciones", ex);   // de-duplicated per distinct failure
+}
+Fix/benefit: log ex.ToString(), drop the untrue sentence, raise one de-duplicated alert for non-SCM failures. Suggested JIRA: SICM-A7 (P2).
+SICM-A8 - Per-service failures are not isolated and cancellation is not propagated
+Severity: Major (P2). Category: rewrite_recommended. Locations: OperacionServicio.cs:222-233 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L222), ControladorServicios.cs:54-70 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L54), :47-49 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L47).
+The catch inside IniciaServicioAsync/DetieneServicioAsync awaits ProcesoInsertaAlerta, which throws when the alert cannot be saved (RepositorioTomi.cs:141-158). That exception escapes the method instead of returning false; await Task.WhenAll surfaces only the first fault, so the other service's exception is never observed or logged. IOperacionServicio.EjecutaProcedimiento() and the IControladorServicios members take no CancellationToken, although the host passes one to OnTimerAsync (ServiceHost.cs:130) and shutdown cancels it; a blocking WaitForStatus(30 s) inside Task.Run cannot be interrupted, so stop can wait for up to 30 s per service (shutdown has a bounded wait in the shared host, so this is delay, not a hang).
+Code block (csharp)
+try { await _repositorioTomi.ProcesoInsertaAlerta(alerta); }
+catch (Exception exAlerta) { Config.EscribirLog($"ERROR|alerta|{exAlerta}", _configuracion.NombreServicio); }
+return ResultadoTransicion.Fallida;
+Fix/benefit: the alert is best-effort and must not replace the transition result; pass a token, poll Refresh() instead of one blocking wait, and handle each task independently so both outcomes are logged. Suggested JIRA: SICM-A8 (P2).
+SICM-A9 - Fourteen/seven/seven-fold duplication, with mislabeled end-time logs
+Severity: Minor (P2). Category: rewrite_recommended. Locations: OperacionServicio.cs:46-121 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L46) (14 cases), :147-168 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L147) (7 guards), :183-216 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L183) (7 blocks), ControladorServicios.cs:58-69,99-110 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L58) (2 alerts).
+Code block (csharp)
+case Enums.ParametrosSistema.HORA_OP_SWF_LU_FIN:
+    _configuracion.HORA_OP_SWF_LU_FIN = ...;
+    Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de inicio de operaciones '" + ...LU_FIN + "'.", ...);   // FIN labeled "inicio"
+All seven *_FIN log lines say "Hora de inicio". The structure is a copy-paste of one weekday x 7 x 2. Line overlap with the sibling SWF_IN_ControladorServicios is 79 % (OperacionServicio), 89 % (ControladorServicios) and 97 % (RepositorioTomi) - the same boilerplate is maintained in several solutions (GEN-4).
+Code block (csharp)
+var ventanas = new Dictionary<DayOfWeek, (TimeSpan Ini, TimeSpan Fin)>();   // filled once from the parameters
+var v = ventanas[ahora.DayOfWeek];
+bool enHorario = ahora.TimeOfDay >= v.Ini && ahora.TimeOfDay <= v.Fin;
+Fix/benefit: one table-driven parser/validator removes ~110 lines, fixes the label once, and makes SICM-A3/A5 single-point fixes. Long term, move the supervisor template into the shared library. Suggested JIRA: SICM-A9 (P2).
+SICM-A10 - Eight independent clock reads and minute truncation
+Severity: Minor (P3). Category: rewrite_recommended. Locations: OperacionServicio.cs:144,183,188,193,198,203,208,213 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L144).
+Code block (csharp)
+var horaActual = DateTime.Now;                                     // 144: time of day
+if (DateTime.Now.DayOfWeek.Equals(DayOfWeek.Monday)) ...           // 183-213: seven more reads
+The time-of-day and the weekday come from different instants (a tick straddling midnight can use Monday's window with Tuesday's time), the shared EsDiaHabil reads the clock again for the holiday date, and seconds are dropped (new TimeSpan(h, m, 0)), so an inclusive FIN of 19:00 stays in-window until 19:00:59. Local-machine time zone is assumed.
+Fix/benefit: read once (var ahora = _reloj.Ahora;) through an injectable clock; document precision and zone. Suggested JIRA: SICM-A10 (P3).
+Nice to Rewrite if Time Permits
+SICM-N1 - Dead code, copy-paste names and typos in the application layer
+Severity: Minor (P3). Category: NiceToRewrite_ifTimePermits. Locations: Proceso.cs (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Modelos/Proceso.cs) (class never referenced), ConfiguracionServicio.cs:32-37 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Modelos/ConfiguracionServicio.cs#L32) (RutaArchivoConfiguracionOriginal/Final, RutaArchivoLogs, StrNombreVisible have one hit each = declaration only), OperacionServicio.cs:122-126 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L122) (try { ... } catch { throw; } is a no-op), :218 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L218) (renders iniciohorario / Terminahorario; also logs "Termina" on every out-of-window tick, not only at the end), :258 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L258) (maracar), :271 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/OperacionServicio.cs#L271) (MensajeThrow throws a bare Exception), EnumComunes.cs:14-15 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Enums/EnumComunes.cs#L14) (controlled-service names hard-coded as "CMS-Swf_IN_MQ"; the deployed names are not in this repository and the shared host sets ServiceName to the un-prefixed Swf_IN_MQ, so verify the SCM names during deployment), and ControladorServicios logs INFO lines with the Ejecuta_Procedimientos tag copied from the other class (:44,:86 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Service/ControladorServicios.cs#L44)) and inconsistently omits the service-name overload.
+Fix/benefit: delete unused members, fix the strings, move service names to configuration with a startup "does this service exist?" check. Suggested JIRA: SICM-N1 (P3).
+4.2 Infraestructura - Tier 1
+MustChange / Rewrite
+No project-local MustChange finding. Ruled out after reading: strFecha.Data.FirstOrDefault().Fecha (RepositorioTomi.cs:126 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Servicio/RepositorioTomi.cs#L126)) is guarded by the preceding Data.Count == 0 check, and StoredProcedureResult<T>.Data is initialized to an empty list by its constructor, so Data.Count cannot throw on a failed query. The build-reproducibility defect for this project is SICM-H2.
+Rewrite Recommended
+SICM-I1 - Failure predicates require all error fields to be set
+Severity: Major (P2). Category: rewrite_recommended. Locations: RepositorioTomi.cs:253 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Servicio/RepositorioTomi.cs#L253), :222-225 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Servicio/RepositorioTomi.cs#L222).
+Code block (csharp)
+if (r.MensajeError != null && r.Exception != null && !r.Exito) { ... throw ...; }          // Terminacion
+if (r.MensajeError != null && r.Exception != null && !r.Exito || r.FilasAfectadas <= 0)   // Ejecucion: && binds tighter than ||
+ProcesoActualizaTerminacion throws only when *message, exception and !Exito* are all present. A result with Exito == false but a null Exception (the shared helper only builds exceptions on its own catch path) is accepted silently, and the tick's final "mark terminated" write can fail without any local signal. The Ejecucion predicate mixes && and || without parentheses; it is currently unreachable (see SICM-N1/SICM-N2) but wrong if reused, because any row count <= 0 throws regardless of Exito.
+Code block (csharp)
+if (!r.Exito) throw new InvalidOperationException($"...{r.MensajeError}", r.Exception);
+Fix/benefit: !Exito is the contract; keep the inner exception. Test Exito=false with and without Exception. Suggested JIRA: SICM-I1 (P2).
+SICM-I2 - Duplicate or null parameter keys abort the whole tick with a generic error
+Severity: Major (P2). Category: rewrite_recommended. Location: RepositorioTomi.cs:197-201 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Servicio/RepositorioTomi.cs#L197).
+Code block (csharp)
+foreach (MapearCamposGenerales parametro in resultadoSp.Data)
+    diccParametros.Add(parametro.Id_parametro, parametro.Valor);
+Dictionary.Add throws ArgumentException on a duplicate id_parametro and ArgumentNullException on a null key. usp_ConsultaParametrosSistema_SwfInCtrlSrvMQ filters 14 ids with IN (...) but nothing in this repository guarantees uniqueness of tb_srv_parametros_sistema.id_parametro (table definition not present - unverified). A duplicate row would stop all supervision with an error that does not name the key.
+Code block (csharp)
+if (!diccParametros.ContainsKey(id)) diccParametros[id] = valor;
+else throw new InvalidOperationException($"Parametro duplicado en TOMI: '{id}'.");
+Fix/benefit: a named, deliberate policy (reject or last-wins + warning). Suggested JIRA: SICM-I2 (P2).
+SICM-I3 - Generic exceptions, double logging and repeated try/catch scaffolding
+Severity: Minor (P2). Category: rewrite_recommended. Locations: RepositorioTomi.cs (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Servicio/RepositorioTomi.cs) - 7 throw new Exception(...) and 8 catch (Exception ex) blocks (e.g. :119-131 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Servicio/RepositorioTomi.cs#L119)).
+Code block (csharp)
+Config.EscribirLog(strMsjError, ...);          // log 1
+throw new Exception(strMsjError);              // generic type, no inner exception
+...
+catch (Exception ex) { Config.EscribirLog("ObtenerFechaSistema: " + ex.Message, ...); throw; }   // log 2 of the same failure
+Every failure is written twice, the original exception from the shared helper is flattened into text, and callers can only catch Exception. Several doc comments are copy-pasted from other methods (ValidaSiEsDiaHabil carries the ObtenerParametrosSistema summary, "...Dictionary<string, string>", at line 161; the ActualizaPuerto* docs list <param> names that do not exist).
+Fix/benefit: throw a typed repository exception with the inner exception, log once at the boundary (the tick), keep one helper for the "run SP, check result" pattern. Suggested JIRA: SICM-I3 (P2).
+Nice to Rewrite if Time Permits
+SICM-N2 - Dead repository members and SQL objects, and an interface that forces NotImplemented fakes
+Severity: Minor (P3). Category: NiceToRewrite_ifTimePermits. Locations: IRepositorioTomi.cs:21,31,63 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Interfaces/IRepositorioTomi.cs#L21), RepositorioTomi.cs:44,78,217 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Servicio/RepositorioTomi.cs#L44), EnumComunes.cs:24-27 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Enums/EnumComunes.cs#L24).
+ActualizaPuertoLibre, ActualizaPuertoEnUso and ProcesoActualizaEjecucion have no callers (the host marks the port through the shared ControlServicio), so usp_ActualizaServicioEnUso_SwfInCtrlSrvMQ, usp_ActualizaServicioLibre_SwfInCtrlSrvMQ and constants usp_MarcaPuertoEnEso (typo "Eso"), usp_MarcaPuertoLibre, usp_EsDiaHabil are unreferenced by this solution. The test fake implements the three members as throw new NotImplementedException() (UnitTest1.cs:209-226 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/UnitTest1.cs#L209)). Note also the asymmetry: the tick *ends* by marking the controller terminated but never marks it started; confirm with the owner whether status in tb_srv_controladoradeservicios is meant to be 0 permanently.
+Fix/benefit: remove or wire the members, drop the two unused procedures from the deployment set, narrow the interface (ISP). Suggested JIRA: SICM-N2 (P3).
+4.3 PruebasUnitarias - Tier 2
+Findings are SICM-A4 (test depth) and SICM-H2 (the test project also references D:\ServiceCMS\MUFG_T24.dll at PruebasUnitarias.csproj:51 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/PruebasUnitarias.csproj#L51) and loads MSTest from the *host's* packages folder, lines 3, 45, 48, 61-82 - a build-order coupling that breaks when the host's package folder is cleaned). Additionally the copyright string in AssemblyInfo.cs (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/Properties/AssemblyInfo.cs) has an encoding problem (no BOM, © may become Â©), see SICM-N3.
+4.4 Swf_IN_ControladorServiciosMQ Host - Tier 2
+MustChange / Rewrite
+SICM-H1 - Database-marker outcomes are discarded and shutdown reports success regardless
+Severity: Major (P1). Category: MustChange/rewrite. Checklist: error handling / logging truthfulness. Locations: ServiceHost.cs:118 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/ServiceHost.cs#L118), :171-176 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/ServiceHost.cs#L171).
+Code block (csharp)
+await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, ..., ct);      // returns bool, ignored (startup)
+await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, ..., cleanupCt);           // returns bool, ignored (shutdown)
+await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt); // returns StoredProcedureResult, ignored
+Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
+Shared source shows both calls report failure by return value, not by exception: ControlServicio.MarcarPuertoEnUsoAsync returns false on a failed/canceled update (ControlServicio.cs:50-64) and RepositorioMaestro.ActualizaTerminacion catches exceptions and returns Exito = false (RepositorioMaestro.cs:1193-1230). The host ignores both, then logs success; at startup it proceeds to run the timer even though the "service in use" row was never written. The OperationCanceledException branch (:179-182 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/ServiceHost.cs#L179)) treats a cleanup-timeout cancellation as "normal shutdown" without noting that the DB rows may not have been updated.
+Code block (csharp)
+if (!await _controlServicio.MarcarPuertoEnUsoAsync(pid, proceso, display, servicio, ct))
+    throw new InvalidOperationException("No se pudo registrar el servicio en uso en TOMI.");   // startup: fail visibly
+...
+var term = await _controlServicio.ActualizaTerminacion(servicio, cleanupCt);
+Config.EscribirLog(term.Exito ? "INFO|OnStop|Terminación registrada." : $"WARN|OnStop|Terminación NO registrada: {term.MensajeError}");
+Fix/benefit: operators and SCM see a failed start rather than a half-registered service, and logs stop claiming a successful database termination that did not happen. Decide whether a failed startup marker should abort start or only alert. Same family as CEP_ControladorServicios CEP-H2. Suggested JIRA: SICM-H1 (P1).
+SICM-H2 - Builds depend on machine-local, unversioned DLLs and an undeclared package stack (GEN-1)
+Severity: Blocker (P1). Category: MustChange/rewrite. Checklist: build reproducibility / dependency management. Locations: D:\ServiceCMS\MUFG_T24.dll at Aplicacion.csproj:56 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Aplicacion/Aplicacion.csproj#L56), Infraestructura.csproj:56 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Infraestructura/Infraestructura.csproj#L56), PruebasUnitarias.csproj:51 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/PruebasUnitarias.csproj#L51), host csproj:93 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ.csproj#L93); D:\ServiceCMS\SimpleInjector.dll at host csproj:96 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ.csproj#L96).
+Code block (xml)
+<Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, processorArchitecture=x86">
+  <SpecificVersion>False</SpecificVersion>
+  <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+</Reference>
+All four projects need an absolute-path, unversioned assembly (SpecificVersion=False); D:\ServiceCMS does not exist here and the portfolio has no nuget.config or MUFG .nupkg, so this is a raw file reference, not a package feed. The host's packages.config also restores 19 packages (13 at version 10.0.3 for net48: Microsoft.Extensions.Configuration*, FileProviders.*, System.Text.Json, System.IO.Pipelines, ...) although no first-party code uses them (0 hits); they appear to mirror MUFG_T24.dll's own transitive needs. A version change in the shared DLL can therefore break the service at runtime with FileLoadException while this solution still compiles.
+Code block (xml)
+<PackageReference Include="MUFG.T24" Version="2.x" />    <!-- internal feed; transitive packages flow from the nuspec -->
+Fix/benefit: publish MUFG_T24 (and pinned SimpleInjector) as a versioned internal package, restore on CI, and remove the hand-copied transitive packages. This is the portfolio-wide GEN-1 remedy: fix it once centrally, not as four per-project edits. Suggested JIRA: SICM-H2 (P1) (link to the GEN-1 epic).
+Rewrite Recommended
+SICM-H3 - Composition root contains unused and duplicated registrations
+Severity: Minor (P2). Category: rewrite_recommended. Location: ServiceHost.cs:18,34,52-55,82-90 (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/Swf_IN_ControladorServiciosMQ/ServiceHost.cs#L52).
+Code block (csharp)
+_containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);                                  // 82
+_containerDI.Register<ConfiguracionServicio>(() => (ConfiguracionServicio)_configuracionBase.Clone(), Lifestyle.Scoped);  // 90 - a second, separate clone
+_containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);                                                         // 83 - never resolved here
+var parametrizacion = new Parametrizacion();                                                                                 // 88 - never used
+Two scoped registrations yield two different clones per scope: a component that mutates the Configuracion instance is invisible to consumers of ConfiguracionServicio. EstadoHorarioOperacion, the local parametrizacion, using System.Net.Http (line 18) and IAlertas (registered at 53, but RepositorioTomi takes the concrete Alertas, RepositorioTomi.cs:27-29) are dead or bypassed. The 10 000 ms fallback (line 34) is a magic number.
+Fix/benefit: register one configuration instance per scope (Register<Configuracion>(() => scopedClone) plus Register<ConfiguracionServicio>(c.GetInstance<...>)), depend on IAlertas, delete the dead lines. Suggested JIRA: SICM-H3 (P2).
+SICM-H4 - 398 restored-package binaries and two IDE caches are tracked in Git
+Severity: Minor (P2). Category: rewrite_recommended. Checklist: repository hygiene. Evidence: git ls-files lists 398 files under Swf_IN_ControladorServiciosMQ/packages/; the checked-in .gitignore has **/[Pp]ackages/* (line 207) and .vs/ (line 40), so they were force-added or committed before the rule. git status currently shows 41 tracked package files as deleted in the working tree (Microsoft.Extensions.Configuration.Abstractions/Binder/FileExtensions/Json, FileProviders.*, FileSystemGlobbing, System.Runtime.CompilerServices.Unsafe), so an unreviewed git add -A would commit the deletions. Two tracked .vs/*.dtbcache.json files leak the build machine path D:\MDW_Services\SWIFT\IN\SWF_IN_ControladorServiciosMQ\... and its reference list.
+Fix/benefit: git rm -r --cached the packages folder and both .vs folders, rely on restore (SICM-H2), and verify no deployment script depends on the committed binaries. Suggested JIRA: SICM-H4 (P2).
+Nice to Rewrite if Time Permits
+SICM-N3 - Documentation, metadata and SQL script hygiene
+Severity: Minor (P3). Category: NiceToRewrite_ifTimePermits. Locations: README.md (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/README.md) (93 lines of unmodified GitLab template - no purpose, schedule parameters, controlled services, deployment account or recovery steps); all four AssemblyInfo.cs have an empty AssemblyCompany; PruebasUnitarias AssemblyInfo.cs (../../SWIFT/Incoming/SWF_IN_ControladorServiciosMQ/PruebasUnitarias/Properties/AssemblyInfo.cs) is UTF-8 without BOM (the other three have one) and contains ©, which a compiler using the ANSI code page bakes in as Â©. SQL (context, outside this repository): 004 SP usp_EsDiaHabil.sql lacks the DROP PROCEDURE IF EXISTS the other four scripts use and an identically named dbo.usp_EsDiaHabil is defined in several solution folders (re-running deployments can fail or overwrite); 005 SP usp_ObtenerFechaSistema.sql is UTF-8 without BOM while 001-004 have a BOM, so ANSI-assuming tools render its header as JesÃºs; the two writers 001/002 assign @Exito/@ErrorMessage and then THROW, so the OUTPUT values are unobservable on failure (and the procedures are unused - SICM-N2).
+Fix/benefit: a real operations README (what it supervises, parameters and their format, how to verify the SCM names) shortens incident response. Suggested JIRA: SICM-N3 (P3).
+5. Architecture-Fit Note
+Apply the standing architecture question in _ORCHESTRATION.md (./_ORCHESTRATION.md). This workload is a bounded periodic local-SCM reconciliation loop (read schedule -> decide -> start/stop two local services), not a continuous message listener and not a multi-step saga. A Windows Service is a reasonable fit because it must act on the *local* Service Control Manager; none of the findings is caused by the hosting model.
+Option	Fits when	Trade-offs / unknowns
+Modernize current service in place	Local SCM control and existing operations remain required	Lowest disruption; needs the fixes below, tests and a packaged shared library
+Modern .NET Worker on Windows	Approved runtime lifecycle and the shared Framework 4.8 library can be migrated	Better hosting APIs; blocked while MUFG_T24 and SimpleInjector remain Framework-only
+Scheduled task / SCM recovery + service dependencies	The 30-second reconciliation can be replaced by two daily start/stop jobs	Simpler lifetime; loses auto-correction when someone stops/starts a service manually
+Event/message-driven supervision	Reliable lifecycle events and scale justify a broker	Adds correctness surface for what is two polling decisions; not automatically safer
+Serverless	A secure agent can perform privileged SCM work	Cannot manage this host's SCM directly; adds a security/availability boundary
+Microservice / full rewrite	A separate ownership/scale/isolation requirement exists	Highest cost; not justified by code quality alone
+
+Sequence: fix definite defects (SICM-A1/A2/A3/H1) -> make the build reproducible and add real tests (SICM-H2, A4) -> remove duplication (SICM-A9; GEN-4) -> then evaluate hosting. Unknown and needed from the owners: SLAs for the two MQ services, the real SCM service names, TOMI configuration values, time zone/holiday authority, weekend policy, the service account's SCM rights, and budget.
+6. JIRA-Ready Backlog
+IDs are stable. All statuses are Open. Each finding belongs to exactly one category.
+ID	Title	Category	Project	File(s)	Priority
+SICM-H2	Package shared DLLs; remove hand-copied package stack (GEN-1)	MustChange/rewrite	All four	Aplicacion.csproj:56; Infraestructura.csproj:56; PruebasUnitarias.csproj:51; host csproj:93,96	P1 - Blocker
+SICM-A1	Distinguish "no change" from "failed" transitions	MustChange/rewrite	Aplicacion	Service\ControladorServicios.cs:42-70,84-111; OperacionServicio.cs:233	P1 - Major
+SICM-A2	Handle pending/paused SCM states explicitly	MustChange/rewrite	Aplicacion	Service\ControladorServicios.cs:42,84	P1 - Major
+SICM-A3	Validate schedule values as time-of-day	MustChange/rewrite	Aplicacion	OperacionServicio.cs:147-168	P1 - Major
+SICM-H1	Check DB-marker results at startup/shutdown; truthful logs	MustChange/rewrite	Host	ServiceHost.cs:118,171-176	P1 - Major
+SICM-A4	Make tests assert start vs stop, failures, boundaries	rewrite_recommended	Tests	UnitTest1.cs:55-130,245,253	P2 - Major
+SICM-A5	Define overnight/weekend schedule contract	rewrite_recommended	Aplicacion	OperacionServicio.cs:183-220	P2 - Major
+SICM-A6	Remove or use per-tick TOMI date	rewrite_recommended	Aplicacion / Infra	OperacionServicio.cs:136; RepositorioTomi.cs:110	P2 - Major
+SICM-A7	Log full exception, alert config/DB failures, fix message	rewrite_recommended	Aplicacion	OperacionServicio.cs:244-260	P2 - Major
+SICM-A8	Isolate per-service failures; propagate cancellation	rewrite_recommended	Aplicacion	Service\ControladorServicios.cs:47-70; OperacionServicio.cs:222	P2 - Major
+SICM-I1	Use !Exito failure predicate; fix precedence	rewrite_recommended	Infraestructura	RepositorioTomi.cs:222,253	P2 - Major
+SICM-I2	Define duplicate/null parameter policy	rewrite_recommended	Infraestructura	RepositorioTomi.cs:197-201	P2 - Major
+SICM-A9	Table-drive schedule code; fix FIN log labels (GEN-4)	rewrite_recommended	Aplicacion	OperacionServicio.cs:46-216; ControladorServicios.cs:58,99	P2 - Minor
+SICM-I3	Typed exceptions, single logging point	rewrite_recommended	Infraestructura	RepositorioTomi.cs (8 catch / 7 throw)	P2 - Minor
+SICM-H3	Clean composition root and duplicate registrations	rewrite_recommended	Host	ServiceHost.cs:18,34,52-55,82-90	P2 - Minor
+SICM-H4	Untrack 398 package binaries and .vs caches	rewrite_recommended	Repository	packages*; Aplicacion\.vs; Infraestructura\.vs	P2 - Minor
+SICM-A10	Single injectable clock, documented precision	rewrite_recommended	Aplicacion	OperacionServicio.cs:144,183-213	P3 - Minor
+SICM-N1	Remove dead app-layer code, fix typos/names	NiceToRewrite_ifTimePermits	Aplicacion	Proceso.cs; ConfiguracionServicio.cs:32-37; OperacionServicio.cs:122,218,258,271; EnumComunes.cs:14	P3 - Minor
+SICM-N2	Remove dead repository members/SPs	NiceToRewrite_ifTimePermits	Aplicacion / Infra	IRepositorioTomi.cs:21,31,63; RepositorioTomi.cs:44,78,217	P3 - Minor
+SICM-N3	Real README, assembly metadata, SQL script hygiene	NiceToRewrite_ifTimePermits	Repository / SQL	README.md; AssemblyInfo.cs; 004/005 SP scripts	P3 - Minor
+
+Suggested Execution Order
+1. Restore a reproducible build (SICM-H2) and untrack binaries (SICM-H4); only then can any test run in CI.
+2. Add deterministic tests with a fake clock and scripted SCM outcomes (SICM-A4) before touching behavior.
+3. Fix the confirmed defects: transition outcome (A1), pending states (A2), schedule validation (A3), startup/shutdown markers (H1).
+4. After owner decisions, settle the schedule contract (A5), the unused date call (A6) and failure reporting/alerts (A7/A8, I1/I2).
+5. Remove duplication and dead code (A9/A10/I3/H3/N1-N3); then consider hosting modernization as a separate decision.
+Required Evidence Before Deployment
+Approved pinned MUFG_T24/SimpleInjector packages; Framework 4.8 x86 Debug/Release build; passing automated tests; real SCM service names and TOMI parameter values (14 HORA_OP_SWF_* rows, format and duplicates); controlled exercise of Running/StartPending/StopPending/Paused states and the 30 s timeout with the production service account; confirmation of weekend/overnight policy; verification that no alerting depends on the current steady-state ERROR line; rollback plan. None of these is silently passed by this static audit.
