@@ -1,0 +1,1175 @@
+using Aplicacion;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Infraestructura.Servicio;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Logeo_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Swf_IN_ControladorServiciosMQ
+{
+    /// <summary>
+    /// Clase principal serviceHost
+    /// </summary>
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        private Container _containerDI;
+        private ConfiguracionServicio _configuracionBase;
+
+        protected override string NombreServicioLog => NombreServicio.Swf_IN_ControladorServiciosMQ.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 10000;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ServiceHost() { }
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del contenedor DI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<IAlertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+
+            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
+
+            _configuracionBase = new ConfiguracionServicio();
+
+            //Inicializa la obtención de la configuración general y el logging...
+            {
+                MUFG_T24.Core.Configuracion.LecturaConfguracionGeneral.Inicializar();
+                ServicioConfiguracionSettings servicioMainConfiguracion = MUFG_T24.Core.Configuracion.LecturaConfguracionGeneral.ObtenerServicio(NombreServicio.Swf_IN_ControladorServiciosMQ.ToString());
+                _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+                _configuracionBase.PathLog = servicioMainConfiguracion.Log;
+                _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+                _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+                _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
+
+                RutasConfiguracion rutas = new RutasConfiguracion()
+                {
+                    MUFG_Servicios_Path_Log = _configuracionBase.PathLog
+                };
+
+                Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);
+                Logging.Write("INFO|Inicializacion|Leyendo archivo de configuración.");
+            }
+
+            //Registra la configuracion...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<ConfiguracionServicio>(() => (ConfiguracionServicio)_configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<IRepositorioTomi, RepositorioTomi>(Lifestyle.Scoped);
+            _containerDI.Register<Aplicacion.Interfaces.IControladorServicios, Aplicacion.Service.ControladorServicios>(Lifestyle.Scoped);
+            _containerDI.Register<Aplicacion.Interfaces.IOperacionServicio, OperacionServicio>(Lifestyle.Scoped);
+
+            _containerDI.Verify();
+
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken ct)
+        {
+            try
+            {
+                //Obtiene el proceso actual...
+                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+
+                Configuracion configMufgT24 = new Configuracion();
+                Configuracion nuevaConfig = await _parametrizacion.ObtenerProcesoActualAsync(configMufgT24);
+                _configuracionBase.Pid = nuevaConfig.Pid;
+                _configuracionBase.NombreProceso = nuevaConfig.NombreProceso;
+                _configuracionBase.NombreDisplay = nuevaConfig.NombreDisplay;
+
+                //Marca el servicio en uso...
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.Value, _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct);
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ParametrizacionesAsync|{ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>   
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+
+            try
+            {
+                //Ejecuta el procedimiento principal del servicio...
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    var operacionServicio = _containerDI.GetInstance<Aplicacion.Interfaces.IOperacionServicio>();
+                    await operacionServicio.EjecutaProcedimiento(ct).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|Realiza_timer|Se presenta exception: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {
+            Config.EscribirLog("INFO|OnStop|Finalizando Servicio.");
+
+            try
+            {
+                if (_containerDI == null || _configuracionBase == null)
+                {
+                    Config.EscribirLog("INFO|OnStop|Terminación omitida por inicialización incompleta.");
+                    return;
+                }
+
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
+                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+
+                    //Marca el servicio en uso...
+                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    //Marca el termino del servicio...
+                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+
+                    Config.EscribirLog("INFO|OnStop|Terminación exitosa de bases de datos.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                //Apagado normal
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|TerminacionAsync|{ex}");
+            }
+            finally
+            {
+                _containerDI?.Dispose();
+            }
+        }
+
+    }
+}
+
+*********************
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using Aplicacion.Modelos.Tomi;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Infraestructura.Servicio
+{
+    /// <summary>
+    /// Clase para conectarse a BD InterfacesT24 
+    /// </summary>
+    public class RepositorioTomi : RepositorioMaestro, IRepositorioTomi
+    {
+        private readonly Alertas _alertas;
+        private readonly ConfiguracionServicio _configuracionServicio;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        /// <param name="alertas"></param>
+        /// <param name="configuracionServicio"></param>
+        public RepositorioTomi(Alertas alertas, ConfiguracionServicio configuracionServicio) :
+            base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        {
+            _alertas = alertas;
+            _configuracionServicio = configuracionServicio;
+        }
+
+        /// <summary>
+        /// Inserta alertas para registrar algun error
+        /// </summary>
+        public async Task ProcesoInsertaAlerta(AlertaDTO alerta)
+        {
+            try
+            {
+                bool boAlertaInsertada = await _alertas.InsertarAlerta(alerta);
+                if (!boAlertaInsertada)
+                {
+                    string strMsjError = "ERROR|ProcesoInsertaAlerta|No se completo la insercion de la Alerta";
+                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
+                    throw new Exception(strMsjError);
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ProcesoInsertaAlerta: " + ex, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Valida si es un día habil o inhabil mediante una consulta a base de datos
+        /// </summary>
+        public async Task<bool> ValidaSiEsDiaHabil()
+        {
+            try
+            {
+                return await EsDiaHabil();
+            }
+            catch (Exception ex)
+            {
+                string strMsjError = $"ERROR|ValidaSiEsDiaHabil|No se pudo recuperar dia habil. Excepcion: {ex}";
+                Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones
+        /// </summary>
+        public async Task<Dictionary<string, string>> ObtenerParametrosSistema(CancellationToken ct)
+        {
+            try
+            {
+                StoredProcedureResult<MapearCamposGenerales> resultadoSp =
+                await EjecutarStoredProcedureQuery<MapearCamposGenerales>(
+                EnumProcedimientosAlmacenados.usp_ParametrosSistema);
+
+                if (resultadoSp.Data.Count == 0 || resultadoSp.MensajeError != null)
+                {
+                    string strMsjError = "ERROR|ObtenerParametrosSistema|" + resultadoSp.MensajeError;
+                    Config.EscribirLog(strMsjError, _configuracionServicio.NombreServicio);
+                    throw new Exception(strMsjError);
+                }
+
+                Dictionary<string, string> diccParametros = new Dictionary<string, string>();
+                foreach (MapearCamposGenerales parametro in resultadoSp.Data)
+                {
+                    diccParametros.Add(parametro.Id_parametro, parametro.Valor);
+                }
+                return diccParametros;
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog("ERROR|ObtenerParametrosSistema|" + ex, _configuracionServicio.NombreServicio);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Actualiza ejecucion del servicio INICIO
+        /// </summary>
+        public async Task ProcesoActualizaEjecucion(string strNombreServicio, int intgpId, string strNombreProceso)
+        {
+
+            var resultActualizaEjec = await ActualizaEJecucion(strNombreServicio);
+
+            ValidaResultado(resultActualizaEjec,
+                nameof(ProcesoActualizaEjecucion));
+
+        }
+
+        /// <summary>
+        /// Actualiza terminacion del proceso
+        /// </summary>
+        public async Task ProcesoActualizaTerminacion(string strNombreServicio, int intgpId, string strNombreProceso)
+        {
+
+            var resultActualizaTerm = await ActualizaTerminacion(strNombreServicio);
+
+            ValidaResultado(resultActualizaTerm,
+                nameof(ProcesoActualizaTerminacion));
+        }
+
+        private static void ValidaResultado(StoredProcedureResult result, string operacion)
+        {
+            if (!result.Exito)
+            {
+                string mensaje = $"ERROR|{operacion}|{result.MensajeError}";
+                throw new InvalidOperationException(mensaje, result.Exception);
+            }
+        }
+    }
+}
+************************
+
+namespace Aplicacion.Enums
+{
+    /// <summary>
+    /// Enum para datos generales
+    /// </summary>
+    public static class EnumComunes
+    {
+        public const string ALERTA_ESTATUS_ERROR = "ERROR";
+
+        public const string Swf_IN_MQ = "CMS-Swf_IN_MQ";
+        public const string Swf_IN_MQ_MX = "CMS-Swf_IN_MQ_MX";
+    }
+
+    /// <summary>
+    /// Enum para Procedimientos Almacenados
+    /// </summary>
+    public static class EnumProcedimientosAlmacenados
+    {
+        public const string usp_ParametrosSistema = "usp_ConsultaParametrosSistema_SwfInCtrlSrvMQ";
+        public const string usp_MarcaPuertoEnEso = "usp_ActualizaServicioEnUso_SwfInCtrlSrvMQ";
+    }
+
+    /// <summary>
+    /// Enum para parametros del sistema
+    /// </summary>
+    public enum ParametrosSistema
+    {
+        HORA_OP_SWF_LU_INI,
+        HORA_OP_SWF_LU_FIN,
+        HORA_OP_SWF_MA_INI,
+        HORA_OP_SWF_MA_FIN,
+        HORA_OP_SWF_MI_INI,
+        HORA_OP_SWF_MI_FIN,
+        HORA_OP_SWF_JU_INI,
+        HORA_OP_SWF_JU_FIN,
+        HORA_OP_SWF_VI_INI,
+        HORA_OP_SWF_VI_FIN,
+        HORA_OP_SWF_SA_INI,
+        HORA_OP_SWF_SA_FIN,
+        HORA_OP_SWF_DO_INI,
+        HORA_OP_SWF_DO_FIN
+    }
+}
+***********************
+using MUFG_T24.Configuracion_utilidades;
+using System;
+
+
+namespace Aplicacion.Modelos
+{
+    /// <summary>
+    /// Propiedades generales del servicio
+    /// </summary>
+    public class ConfiguracionServicio : Configuracion
+    {
+        public TimeSpan? StrFechaSistemaServicio { get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_LU_INI {  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_LU_FIN {  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_MA_INI {  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_MA_FIN {  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_MI_INI {  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_MI_FIN {  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_JU_INI {  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_JU_FIN { get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_VI_INI{  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_VI_FIN{  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_SA_INI{  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_SA_FIN{  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_DO_INI{  get; set; } = null;
+        public TimeSpan? HORA_OP_SWF_DO_FIN{  get; set; } = null;
+        public bool EnHorarioOperaciones { get; set; } = false;
+        public bool BoEsDiaHabil { get; set; } = false;
+    }
+}
+**************************
+using Aplicacion.Modelos;
+using MUFG_T24.Modelos;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interfaz que implementa consultas y no consultas a bd InterfacesT24
+    /// </summary>
+    public interface IRepositorioTomi
+    {
+          /// <summary>
+        /// Inserta alertas
+        /// </summary>
+        /// <param name="alerta"></param>
+        /// <returns></returns>
+        Task ProcesoInsertaAlerta(AlertaDTO alerta);
+
+        /// <summary>
+        /// Valida si puede operar el servicio
+        /// </summary>  
+        /// <returns>true/false</returns>
+        Task<bool> ValidaSiEsDiaHabil();
+
+        /// <summary>
+        /// Obtiene los parametros del sistema necesario para la operacion del servicio, incluye horarios de inicio y finalizacion de operaciones
+        /// </summary>
+        /// <returns>Dictionary<string, string></returns>
+        Task<Dictionary<string, string>> ObtenerParametrosSistema(CancellationToken ct);
+
+        /// <summary>
+        /// Actualiza ejecucion del servicio INICIO
+        /// </summary>
+        /// <param name="strFolio"></param>
+        /// <returns></returns>
+        Task ProcesoActualizaEjecucion(string strNombreServicio, int intgpId, string strNombreProceso);
+
+        /// <summary>
+        /// Actualiza terminacion del proceso
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <param name="intgpId"></param>
+        /// <param name="strNombreProceso"></param>
+        /// <returns></returns>
+        Task ProcesoActualizaTerminacion(string strNombreServicio, int intgpId, string strNombreProceso);
+    }
+}
+***********************
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Interfaces
+{
+    /// <summary>
+    /// Interface IControladorServicios, tiene la lista de los metodos que se van a utilizar para iniciar o detener los servicios.
+    /// </summary>
+    public interface IControladorServicios
+    {
+        /// <summary>
+        /// Proceso para levantar servicio
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <returns>true/false</returns>
+        Task<bool> IniciaServicioAsync(string strNombreServicio);
+
+        /// <summary>
+        /// Proceso para bajar servicio
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        /// <returns>true/false</returns>
+        Task<bool> DetieneServicioAsync(string strNombreServicio);
+    }
+}
+**********************using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Modelos;
+using System;
+using System.ServiceProcess;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Aplicacion.Service
+{
+    /// <summary>
+    /// Clase para levantar y detener servicios
+    /// </summary>
+    public class ControladorServicios : IControladorServicios
+    {
+        private readonly ConfiguracionServicio _configuracion;
+        private readonly IRepositorioTomi _repositorioTomi;
+
+        /// <summary>
+        /// Constructor
+        /// </summary>
+        /// <param name="configuracion"></param>
+        /// <param name="repositorioTomi"></param>
+        public ControladorServicios(ConfiguracionServicio configuracion, IRepositorioTomi repositorioTomi)
+        {
+            _configuracion = configuracion;
+            _repositorioTomi = repositorioTomi;
+        }
+
+        /// <summary>
+        /// Inicia un servico de Windows.
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        public async Task<bool> IniciaServicioAsync(string strNombreServicio)
+        {
+            try
+            {
+                using (ServiceController serviceController = new ServiceController(strNombreServicio, "."))
+                {
+                    serviceController.Refresh();
+
+                    if (serviceController.Status == ServiceControllerStatus.Running)
+                    {
+                        Config.EscribirLog($"INFO|IniciaServicio|El servicio {strNombreServicio} ya se encuentra iniciado.");
+                        return true;
+                    }
+
+                    Config.EscribirLog($"INFO|IniciaServicio|Inicialización del Servicio '{strNombreServicio}'.");
+
+                    await Task.Run(() =>
+                    {
+                        serviceController.Start();
+
+                        serviceController.WaitForStatus(
+                            ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
+                    });
+
+                    serviceController.Refresh();
+
+                    if (serviceController.Status == ServiceControllerStatus.Running)
+                    {
+                        Config.EscribirLog($"INFO|IniciaServicio|Servicio {strNombreServicio} iniciado correctamente.");
+                        return true;
+                    }
+                    else
+                    {
+                        string msj = $"No fue posible iniciar el servicio {strNombreServicio}.";
+                        Config.EscribirLog($"ERROR|IniciaServicio|{msj}");
+
+                        try
+                        {
+                            await _repositorioTomi.ProcesoInsertaAlerta(
+                            new AlertaDTO()
+                            {
+                                Folio = null,
+                                TipoOPeracion = null,
+                                Servicio = strNombreServicio,
+                                ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
+                                Descipcion = msj,
+                                PId = (int)_configuracion.Pid,
+                                NombreProceso = _configuracion.NombreProceso,
+                                Exception = null
+                            });
+
+                        }
+                        catch (Exception exAlerta)
+                        {
+                            Config.EscribirLog($"INFO|IniciaServicio|No fue posible generar la alerta: {exAlerta}.");
+                        }
+
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|IniciaServicio|Excepcion: {ex}");
+
+                try
+                {
+                    await _repositorioTomi.ProcesoInsertaAlerta(new AlertaDTO()
+                    {
+                        Folio = null,
+                        TipoOPeracion = null,
+                        Servicio = _configuracion.NombreServicio,
+                        ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
+                        Descipcion = $"Error al tratar de levantar el servicio: {strNombreServicio}.",
+                        PId = (int)_configuracion.Pid,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = ex
+                    });
+                }
+                catch (Exception exAlerta)
+                {
+                    Config.EscribirLog($"INFO|IniciaServicio|No fue posible generar la alerta: {exAlerta}.");
+                }
+
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Detiene un servicio de Windows.
+        /// </summary>
+        /// <param name="strNombreServicio"></param>
+        public async Task<bool> DetieneServicioAsync(string strNombreServicio)
+        {
+            try
+            {
+                using (ServiceController serviceController = new ServiceController(strNombreServicio, "."))
+                {
+                    serviceController.Refresh();
+
+                    if (serviceController.Status == ServiceControllerStatus.Stopped)
+                    {
+                        Config.EscribirLog($"INFO|DetieneServicio|El servicio: {strNombreServicio} esta detenido.");
+                        return true;
+                    }
+
+                    Config.EscribirLog($"INFO|DetieneServicio|Finalización del servicio: {strNombreServicio}.");
+
+                    await Task.Run(() =>
+                    {
+                        serviceController.Stop();
+
+                        serviceController.WaitForStatus(
+                            ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
+                    });
+
+                    serviceController.Refresh();
+
+                    if (serviceController.Status == ServiceControllerStatus.Stopped)
+                    {
+                        Config.EscribirLog($"INFO|DetieneServicio|Finalización del Servicio");
+                        return true;
+                    }
+                    else
+                    {
+                        string msj = $"No fue posible detener el servicio: {strNombreServicio}.";
+
+                        Config.EscribirLog($"ERROR|DetieneServicio|{msj}");
+
+                        try
+                        {
+                            await _repositorioTomi.ProcesoInsertaAlerta(
+                            new AlertaDTO()
+                            {
+                                Folio = null,
+                                TipoOPeracion = null,
+                                Servicio = strNombreServicio,
+                                ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
+                                Descipcion = msj,
+                                PId = (int)_configuracion.Pid,
+                                NombreProceso = _configuracion.NombreProceso,
+                                Exception = null
+                            });
+                        }
+                        catch (Exception exAlert)
+                        {
+                            Config.EscribirLog($"INFO|DetieneServicio|No fue posible generar la alerta: {exAlert}.");
+                        }
+
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|DetieneServicio|Excepcion: {ex}");
+
+                try
+                {
+                    await _repositorioTomi.ProcesoInsertaAlerta(new AlertaDTO()
+                    {
+                        Folio = null,
+                        TipoOPeracion = null,
+                        Servicio = _configuracion.NombreServicio,
+                        ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
+                        Descipcion = $"Error al tratar de detener el servicio '{strNombreServicio}'",
+                        PId = (int)_configuracion.Pid,
+                        NombreProceso = _configuracion.NombreProceso,
+                        Exception = ex
+                    });
+                }
+                catch (Exception exAlerta)
+                {
+                    Config.EscribirLog($"INFO|DetieneServicio|No fue posible generar la alerta: {exAlerta}.");
+                }
+            }
+            return false;
+        }
+    }
+}
+***********************
+using Aplicacion.Enums;
+using Aplicacion.Interfaces;
+using Aplicacion.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Comunes.Helpers;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Aplicacion
+{
+    /// <summary>
+    /// Ejecuta el proceso para levantar y detener servicios
+    /// </summary>
+    public class OperacionServicio : IOperacionServicio
+    {
+        private readonly IRepositorioTomi _repositorioTomi;
+        private readonly IControladorServicios _controlador;
+        private readonly ConfiguracionServicio _configuracion;
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        /// <param name="repositorioTomi"></param>
+        /// <param name="configuracion"></param>
+        /// <param name="controlador"></param>
+        public OperacionServicio(IRepositorioTomi repositorioTomi,
+            ConfiguracionServicio configuracion, IControladorServicios controlador)
+        {
+            _configuracion = configuracion;
+            _repositorioTomi = repositorioTomi;
+            _controlador = controlador;
+        }
+
+
+        /// <summary>
+        /// Parametros sistema, hora, url
+        /// </summary>
+        private async Task ObtenerParametrosSistema(CancellationToken ct)
+        {
+            try
+            {
+                Dictionary<string, string> ltsParametrosSistema = await _repositorioTomi.ObtenerParametrosSistema(ct);
+                foreach (KeyValuePair<string, string> paramSistema in ltsParametrosSistema)
+                {
+                    if (!Enum.TryParse(paramSistema.Key, out Enums.ParametrosSistema parametro))
+                        continue; // Cambia el tipo string a un enum
+
+                    switch (parametro)
+                    {
+                        case Enums.ParametrosSistema.HORA_OP_SWF_LU_INI:
+                            _configuracion.HORA_OP_SWF_LU_INI = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_LU_INI.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de inicio de operaciones '" + _configuracion.HORA_OP_SWF_LU_INI + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_LU_FIN:
+                            _configuracion.HORA_OP_SWF_LU_FIN = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_LU_FIN.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora fin de operaciones '" + _configuracion.HORA_OP_SWF_LU_FIN + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_MA_INI:
+                            _configuracion.HORA_OP_SWF_MA_INI = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_MA_INI.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de inicio de operaciones '" + _configuracion.HORA_OP_SWF_MA_INI + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_MA_FIN:
+                            _configuracion.HORA_OP_SWF_MA_FIN = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_MA_FIN.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora fin de operaciones '" + _configuracion.HORA_OP_SWF_MA_FIN + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_MI_INI:
+                            _configuracion.HORA_OP_SWF_MI_INI = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_MI_INI.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de inicio de operaciones '" + _configuracion.HORA_OP_SWF_MI_INI + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_MI_FIN:
+                            _configuracion.HORA_OP_SWF_MI_FIN = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_MI_FIN.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora fin de operaciones '" + _configuracion.HORA_OP_SWF_MI_FIN + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_JU_INI:
+                            _configuracion.HORA_OP_SWF_JU_INI = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_JU_INI.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de inicio de operaciones '" + _configuracion.HORA_OP_SWF_JU_INI + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_JU_FIN:
+                            _configuracion.HORA_OP_SWF_JU_FIN = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_JU_FIN.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora fin de operaciones '" + _configuracion.HORA_OP_SWF_JU_FIN + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_VI_INI:
+                            _configuracion.HORA_OP_SWF_VI_INI = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_VI_INI.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de inicio de operaciones '" + _configuracion.HORA_OP_SWF_VI_INI + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_VI_FIN:
+                            _configuracion.HORA_OP_SWF_VI_FIN = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_VI_FIN.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora fin de operaciones '" + _configuracion.HORA_OP_SWF_VI_FIN + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_SA_INI:
+                            _configuracion.HORA_OP_SWF_SA_INI = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_SA_INI.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de inicio de operaciones '" + _configuracion.HORA_OP_SWF_SA_INI + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_SA_FIN:
+                            _configuracion.HORA_OP_SWF_SA_FIN = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_SA_FIN.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora fin de operaciones '" + _configuracion.HORA_OP_SWF_SA_FIN + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_DO_INI:
+                            _configuracion.HORA_OP_SWF_DO_INI = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_DO_INI.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora de inicio de operaciones '" + _configuracion.HORA_OP_SWF_DO_INI + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                        case Enums.ParametrosSistema.HORA_OP_SWF_DO_FIN:
+                            _configuracion.HORA_OP_SWF_DO_FIN = ConversionHelper.ParseTimeSpanRequerido(paramSistema.Value, ParametrosSistema.HORA_OP_SWF_DO_FIN.ToString());
+                            Config.EscribirLog("INFO|obtenerParametrosSistema|Hora fin de operaciones '" + _configuracion.HORA_OP_SWF_DO_FIN + "'.",
+                                _configuracion.NombreServicio);
+                            break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|obtenerParametrosSistema|Se presenta excepción: {ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Obtiene los parametros del sistema necesario para la operacion del servicio
+        /// </summary>
+        private async Task ObtenerParametros(CancellationToken ct)
+        {
+            try
+            {
+                await _repositorioTomi.ProcesoActualizaEjecucion(
+                 _configuracion.NombreServicio, (int)_configuracion.Pid, _configuracion.NombreProceso);
+
+                _configuracion.BoEsDiaHabil = await _repositorioTomi.ValidaSiEsDiaHabil();
+                await ObtenerParametrosSistema(ct);
+
+                // Obtencion de la fecha del sistema.
+                var horaActual = DateTime.Now;
+                _configuracion.StrFechaSistemaServicio = new TimeSpan(horaActual.Hour, horaActual.Minute, 0);
+
+                if (string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_LU_INI.ToString()) || string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_LU_FIN.ToString()))
+                    MensajeThrow("No se especifica la hora de inicio/fin de operaciones LUNES");
+
+                if (string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_MA_INI.ToString()) || string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_MA_FIN.ToString()))
+                    MensajeThrow("No se especifica la hora de inicio/fin de operaciones MARTES");
+
+                if (string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_MI_INI.ToString()) || string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_MI_FIN.ToString()))
+                    MensajeThrow("No se especifica la hora de inicio/fin de operaciones MIERCOLES");
+
+                if (string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_JU_INI.ToString()) || string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_JU_FIN.ToString()))
+                    MensajeThrow("No se especifica la hora de inicio/fin de operaciones JUEVES");
+
+                if (string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_VI_INI.ToString()) || string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_VI_FIN.ToString()))
+                    MensajeThrow("No se especifica la hora de inicio/fin de operaciones VIERNES");
+
+                if (string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_SA_INI.ToString()) || string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_SA_FIN.ToString()))
+                    MensajeThrow("No se especifica la hora de inicio/fin de operaciones SABADO");
+
+                if (string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_DO_INI.ToString()) || string.IsNullOrEmpty(_configuracion.HORA_OP_SWF_DO_FIN.ToString()))
+                    MensajeThrow("No se especifica la hora de inicio/fin de operaciones DOMINGO");
+            }
+            catch (Exception ex)
+            {
+                Config.EscribirLog($"ERROR|ObtenerParametros|Se presenta excepción: {ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta procedimeinto
+        /// </summary>
+        /// <returns></returns>
+        public async Task EjecutaProcedimiento(CancellationToken ct)
+        {
+            Exception excepcionPrincipal = null;
+            try
+            {
+                await ObtenerParametros(ct);
+                _configuracion.EnHorarioOperaciones = false;
+
+                if (DateTime.Now.DayOfWeek.Equals(DayOfWeek.Monday))
+                {
+                    _configuracion.EnHorarioOperaciones = (_configuracion.StrFechaSistemaServicio >= _configuracion.HORA_OP_SWF_LU_INI &&
+                        _configuracion.StrFechaSistemaServicio <= _configuracion.HORA_OP_SWF_LU_FIN);
+                }
+
+                if (DateTime.Now.DayOfWeek.Equals(DayOfWeek.Tuesday))
+                {
+                    _configuracion.EnHorarioOperaciones = (_configuracion.StrFechaSistemaServicio >= _configuracion.HORA_OP_SWF_MA_INI &&
+                        _configuracion.StrFechaSistemaServicio <= _configuracion.HORA_OP_SWF_MA_FIN);
+                }
+
+                if (DateTime.Now.DayOfWeek.Equals(DayOfWeek.Wednesday))
+                {
+                    _configuracion.EnHorarioOperaciones = (_configuracion.StrFechaSistemaServicio >= _configuracion.HORA_OP_SWF_MI_INI &&
+                        _configuracion.StrFechaSistemaServicio <= _configuracion.HORA_OP_SWF_MI_FIN);
+                }
+
+                if (DateTime.Now.DayOfWeek.Equals(DayOfWeek.Thursday))
+                {
+                    _configuracion.EnHorarioOperaciones = (_configuracion.StrFechaSistemaServicio >= _configuracion.HORA_OP_SWF_JU_INI &&
+                        _configuracion.StrFechaSistemaServicio <= _configuracion.HORA_OP_SWF_JU_FIN);
+                }
+
+                if (DateTime.Now.DayOfWeek.Equals(DayOfWeek.Friday))
+                {
+                    _configuracion.EnHorarioOperaciones = (_configuracion.StrFechaSistemaServicio >= _configuracion.HORA_OP_SWF_VI_INI &&
+                        _configuracion.StrFechaSistemaServicio <= _configuracion.HORA_OP_SWF_VI_FIN);
+                }
+
+                if (DateTime.Now.DayOfWeek.Equals(DayOfWeek.Saturday))
+                {
+                    _configuracion.EnHorarioOperaciones = (_configuracion.StrFechaSistemaServicio >= _configuracion.HORA_OP_SWF_SA_INI &&
+                        _configuracion.StrFechaSistemaServicio <= _configuracion.HORA_OP_SWF_SA_FIN);
+                }
+
+                if (DateTime.Now.DayOfWeek.Equals(DayOfWeek.Sunday))
+                {
+                    _configuracion.EnHorarioOperaciones = (_configuracion.StrFechaSistemaServicio >= _configuracion.HORA_OP_SWF_DO_INI &&
+                        _configuracion.StrFechaSistemaServicio <= _configuracion.HORA_OP_SWF_DO_FIN);
+                }
+
+                Config.EscribirLog($"INFO|Ejecuta_Procedimiento|{(_configuracion.EnHorarioOperaciones ? "inicio" : "Termina")}" +
+                    $"horario de operaciones, HoraSistema='{_configuracion.StrFechaSistemaServicio:hh\\:mm}'.", NombreServicio.Swf_IN_ControladorServiciosMQ.ToString());
+
+                bool bolPuedeIniciar = _configuracion.EnHorarioOperaciones;
+
+                Task<bool>[] tareas = new[]
+                {
+                        bolPuedeIniciar
+                        ? _controlador.IniciaServicioAsync(EnumComunes.Swf_IN_MQ)
+                        : _controlador.DetieneServicioAsync(EnumComunes.Swf_IN_MQ),
+
+                        bolPuedeIniciar
+                        ? _controlador.IniciaServicioAsync(EnumComunes.Swf_IN_MQ_MX)
+                        : _controlador.DetieneServicioAsync(EnumComunes.Swf_IN_MQ_MX),
+                };
+
+                bool[] resultados = await Task.WhenAll(tareas);
+
+                if (resultados.Any(x => !x))
+                {
+                    Config.EscribirLog($"ERROR|Uno o mas servicios no alcanzaron el estado deseado: " +
+                        $"{_configuracion.NombreServicio}");
+                }
+                else
+                {
+                    Config.EscribirLog($"INFO|Todos los servicios alcanzaron el estado deseado: " +
+                        $"{_configuracion.NombreServicio}");
+                }
+            }
+            catch (Exception ex)
+            {
+                excepcionPrincipal = ex;
+
+                Config.EscribirLog("ERROR|Ejecuta_Procedimiento|Se presenta exception: "
+                    + ex, _configuracion.NombreServicio);
+
+                await _repositorioTomi.ProcesoInsertaAlerta(new AlertaDTO()
+                {
+                    Folio = null,
+                    TipoOPeracion = null,
+                    Servicio = _configuracion.NombreServicio,
+                    ClaveAviso = EnumComunes.ALERTA_ESTATUS_ERROR,
+                    Descipcion = $"Error durante la evaluación de configuración o acceso a datos.",
+                    PId = (int)_configuracion.Pid,
+                    NombreProceso = _configuracion.NombreProceso,
+                    Exception = ex
+                });
+
+                throw;
+            }
+            finally
+            {
+                try
+                {
+                    await _repositorioTomi.ProcesoActualizaTerminacion(
+                        _configuracion.NombreServicio, (int)_configuracion.Pid, _configuracion.NombreProceso);
+                }
+                catch (Exception exFinally)
+                {
+                    Config.EscribirLog($"ERROR|Ejecuta_Procedimiento|No fue posible marcar el servicio en finalización: {exFinally}");
+
+                    if (excepcionPrincipal == null)
+                    {
+                        throw;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Registra un mensaje de error y genera una excepción.
+        /// </summary>
+        /// <param name="mensaje">
+        /// Mensaje de error a registrar.
+        /// </param>
+        private void MensajeThrow(string mensaje)
+        {
+            Config.EscribirLog(mensaje, _configuracion.NombreServicio);
+            throw new InvalidOperationException(mensaje);
+        }
+    }
+}
+***************
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{804105A6-506E-4282-A588-A818A994A645}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Swf_IN_ControladorServiciosMQ</RootNamespace>
+    <AssemblyName>Swf_IN_ControladorServiciosMQ</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <Deterministic>true</Deterministic>
+    <NuGetPackageImportStamp>
+    </NuGetPackageImportStamp>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>x86</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>x86</PlatformTarget>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup>
+    <StartupObject />
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x86\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\x86\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Bcl.AsyncInterfaces.10.0.3\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.10.0.3\lib\net462\Microsoft.Extensions.Configuration.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration.Abstractions, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.Abstractions.10.0.3\lib\net462\Microsoft.Extensions.Configuration.Abstractions.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration.Binder, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.Binder.10.0.3\lib\net462\Microsoft.Extensions.Configuration.Binder.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration.FileExtensions, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.FileExtensions.10.0.3\lib\net462\Microsoft.Extensions.Configuration.FileExtensions.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Configuration.Json, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Configuration.Json.10.0.3\lib\net462\Microsoft.Extensions.Configuration.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.FileProviders.Abstractions, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.FileProviders.Abstractions.10.0.3\lib\net462\Microsoft.Extensions.FileProviders.Abstractions.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.FileProviders.Physical, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.FileProviders.Physical.10.0.3\lib\net462\Microsoft.Extensions.FileProviders.Physical.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.FileSystemGlobbing, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.FileSystemGlobbing.10.0.3\lib\net462\Microsoft.Extensions.FileSystemGlobbing.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Primitives, Version=10.0.0.3, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>packages\Microsoft.Extensions.Primitives.10.0.3\lib\net462\Microsoft.Extensions.Primitives.dll</HintPath>
+    </Reference>
+    <Reference Include="MUFG_T24, Version=1.0.0.0, Culture=neutral, processorArchitecture=x86">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+    </Reference>
+    <Reference Include="SimpleInjector">
+      <HintPath>D:\ServiceCMS\SimpleInjector.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Buffers, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Core" />
+    <Reference Include="System.IO.Pipelines, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.IO.Pipelines.10.0.3\lib\net462\System.IO.Pipelines.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Memory, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Memory.4.6.3\lib\net462\System.Memory.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Numerics" />
+    <Reference Include="System.Numerics.Vectors, Version=4.1.6.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Runtime.CompilerServices.Unsafe, Version=6.0.3.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Text.Encodings.Web, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Text.Encodings.Web.10.0.3\lib\net462\System.Text.Encodings.Web.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Text.Json, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Text.Json.10.0.3\lib\net462\System.Text.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.4.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll</HintPath>
+    </Reference>
+    <Reference Include="System.ValueTuple" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="ServiceHost.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ServiceHost.Designer.cs">
+      <DependentUpon>ServiceHost.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Program.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="App.config" />
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Aplicacion\Aplicacion.csproj">
+      <Project>{2B26AF54-13AD-4A47-86BC-2A8ADD0AA81F}</Project>
+      <Name>Aplicacion</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\Infraestructura\Infraestructura.csproj">
+      <Project>{B75722B1-16B9-4EB6-B140-3B7965EA5D32}</Project>
+      <Name>Infraestructura</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Import Project="packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets" Condition="Exists('packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" />
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets'))" />
+  </Target>
+</Project>
+
+
