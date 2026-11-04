@@ -1,0 +1,53 @@
+ Private Sub Procesa_Parametros()
+     Dim lrsDatos As DbDataReader
+     Dim laListaFolios As ArrayList
+     Dim lsFolio As String
+     Dim laValores_Formato(9) As Object
+     Dim liIdx As Integer, liRegs As Integer
+
+     Try
+         ' Buscamos las solicitudes
+         laListaFolios = New ArrayList()
+         lrsDatos = goTOMI_Database.Execute_Query("SELECT id_solicitud FROM tomser.dbo.solicitudes_parametros WHERE status='CONFIRMADO'")
+         If Not IsNothing(lrsDatos) Then
+             Do While lrsDatos.Read
+                 laListaFolios.Add(lrsDatos.Item(0))
+             Loop
+             lrsDatos.Close()
+             lrsDatos = Nothing
+         End If
+
+         'Analizamos las solcitudes
+         For Each lsFolio In laListaFolios
+             write_Log("INFO|Procesa_Parametros|Procesando solicitud parámetros: " & lsFolio)
+             For liIdx = 1 To 23
+                 lrsDatos = goTOMI_Database.Execute_Query("SELECT B.Descripcion,B.Id_Solicitud,B.Id_Formato,B.Formato,A.Id_Cliente,B.TipoFormato,B.MontoOperacion,B.Moneda,B.Firma FROM tomser.dbo.SOLICITUDES_PARAMETROS A INNER JOIN tomser.dbo.SOLICITUDES_PARAMETROS_DETALLE B ON A.ID_SOLICITUD = B.Id_Solicitud WHERE (A.ID_SOLICITUD = " & lsFolio & ") AND (B.ID_FORMATO=" & liIdx & ") ORDER BY B.Id_Formato")
+                 If Not IsNothing(lrsDatos) Then
+                     Do While lrsDatos.Read
+                         laValores_Formato(1) = lrsDatos.Item(0) 'Descripcion
+                         laValores_Formato(2) = lrsDatos.Item(1) 'Id_solicitud
+                         laValores_Formato(3) = lrsDatos.Item(2) 'Id_formato
+                         laValores_Formato(4) = lrsDatos.Item(3) 'Formato
+                         laValores_Formato(5) = lrsDatos.Item(4) 'Id_Cliente
+                         laValores_Formato(6) = lrsDatos.Item(5) 'TipoFormato
+                         laValores_Formato(7) = lrsDatos.Item(6) 'MontoOperacion
+                         laValores_Formato(8) = lrsDatos.Item(7) 'Moneda
+                         laValores_Formato(9) = lrsDatos.Item(8) 'Firma
+                     Loop
+                     lrsDatos.Close()
+                     lrsDatos = Nothing
+                 End If
+
+
+                 liRegs = goCMS_Database.Execute_Command("DELETE FROM parametros_cliente WHERE id_formato=" & laValores_Formato(3) & " AND id_cliente=" & laValores_Formato(5))
+                 liRegs = goTOMI_Database.Execute_Command("DELETE FROM tomser.dbo.parametros_cliente WHERE id_formato=" & laValores_Formato(3) & " AND id_cliente=" & laValores_Formato(5))
+                 liRegs = goCMS_Database.Execute_Command("INSERT INTO parametros_cliente VALUES ('" & laValores_Formato(1) & "'," & laValores_Formato(2) & "," & laValores_Formato(3) & ",'" & laValores_Formato(4) & "'," & laValores_Formato(5) & "," & laValores_Formato(6) & "," & laValores_Formato(7) & ",'" & laValores_Formato(8) & "'," & laValores_Formato(9) & ")")
+                 liRegs = goTOMI_Database.Execute_Command("INSERT INTO tomser.dbo.parametros_cliente VALUES ('" & laValores_Formato(1) & "'," & laValores_Formato(2) & "," & laValores_Formato(3) & ",'" & laValores_Formato(4) & "'," & laValores_Formato(5) & "," & laValores_Formato(6) & "," & laValores_Formato(7) & ",'" & laValores_Formato(8) & "'," & laValores_Formato(9) & ")")
+                 write_Log("INFO|Procesa_Parametros|Se termina procesamiento de Parametros Generales: " & lsFolio)
+             Next liIdx
+             liRegs = goTOMI_Database.Execute_Command("UPDATE tomser.dbo.solicitudes_parametros SET status='PROCESADO' WHERE id_solicitud=" & laValores_Formato(2))
+         Next lsFolio
+     Catch lexProcesaParametros As Exception
+         write_Log("ERROR|Procesa_Parametros|Ocurre exception: " & lexProcesaParametros.ToString)
+     End Try
+ End Sub
