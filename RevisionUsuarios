@@ -1,0 +1,483 @@
+Usuarios Recommendations
+Usuarios - Architecture & Code Quality Recommendations
+COMPLETE SOURCE AUDIT - all four projects and repository-support files reviewed. Date: 2026-10-14. Solution: Usuarios.slnx (../../CMS/Usuarios/Usuarios.slnx).
+Compared against the coding baseline (../BaseLine_Docs/LoansApp_Architecture_Patterns_and_Coding_Practices.md) and PR checklist (../BaseLine_Docs/code_review.md). See the portfolio control document (./_ORCHESTRATION.md), the exhaustive application tracker (./_AplicacionUsuarios_ExhaustiveReview_Progress.md), and the current dependency ladder (../excecutive_docs/Usuarios/Base_Project_Dependency_Ladder.md). The solution continuation tracker (./_Usuarios_ExhaustiveReview_Progress.md) records the infrastructure, host, tests, contextual-contract verification and executed checks. The full source manifest (./_Usuarios_FileManifest.csv) includes per-file line counts and SHA256 at source revision 457d60c57fe1114bd5730365bd6699933f8e577a. The skill's six-section recommendation template is used; the checklist supplies rules/severity, not a changed-lines PR verdict or an unsupported production-release certification.
+1. Solution Overview (low/no-dependency -> high dependency)
+Tier	Project	Kind	Path relative to solution
+0	AplicacionUsuarios	Application library, net48/x86	Aplicacion\AplicacionUsuarios.csproj
+1	InfraestructuraUsuarios	Repository library, net48/x86	Infraestructura\InfraestructuraUsuarios.csproj
+2	Usuarios	Windows Service executable, net48/x86	Usuarios\Usuarios.csproj
+2	PruebasUnitarias	MSTest/Moq project, net48/x86	PruebasUnitarias\PruebasUnitarias.csproj
+
+What this solution actually does: a timer-driven Windows worker processes confirmed user-administration requests and synchronizes clients, accounts, email addresses, tokens and permissions across CMS, TOMI and TOMSER. It also unblocks IPs, processes queued scripts and runs startup-labelled inactivity/password checks. General processes run in explicit order before startup-labelled processes on the first eligible application invocation. Operations depend on shared MUFG_T24 configuration/service-control facilities. No HTTP API or message listener is evidenced in this solution.
+2. Scope & Methodology Note
+Area	Current evidence
+Application full read	All 77 files / 4,123 physical lines, including 74 C# files, csproj and both configs
+Batch record	Metadata M0 plus seven full-read batches B1-B7; exact file manifest validated
+Infrastructure full read	All 28 files / 2,321 physical lines
+Host full read	All 6 files / 566 physical lines
+Tests full read	All 22 files / 2,191 physical lines
+Repository-support full read	Solution XML: 18 lines; .gitignore: 482 lines
+Total	135/135 files, 9,701/9,701 physical lines, including 124 C# files; no sampling
+Baseline quality	Baseline has incomplete evidence/count fields; use its explicit practice guidance, not its unsupported coverage assertions
+Business intent	No linked story, SLA, schema/procedure specification or acceptance criteria supplied; no requirement-conformance verdict
+Dependencies	Relevant shared host/configuration/repository contracts and three external SQL procedures read as context; not a full dependency/SQL-estate audit
+Execution	Isolated EstadoServicio source smoke passed; test discovery found no tests; legacy MSBuild probe failed MSB4041; no full build/MSTest/runtime verification
+Side effects	No application changes, package restore, service start, database access or generated release binaries
+
+Whole-application scans supplement, not replace, the full read: 44 literal-placeholder logging lines in 13 files; four identical format loops in four files; 11 Task.WhenAll lines in four files; 17 broad catches; four nullable .Value uses; two guarded/fallback FirstOrDefault uses. No matching throw ex;, sync-over-async or deprecated-crypto identifiers were found in this application scope. That does not certify shared dependencies. Infrastructure contains 56 return result.Exito lines and 12 return result.Data lines: booleans are exposed but often ignored by callers; query data is returned without checking the provider outcome. The test source has 35 TestMethod attributes, three DataRows, 37 Assert lines and 51 Verify lines. Four mutation mocks explicitly return false while their three tests expect success. Counts are matching lines, not executed cases or measured coverage.
+Findings below are local source/contract findings, not reproduced production incidents. Where runtime contracts are needed, verified source contracts and remaining uncertainty are identified. This report contains 24 findings: 18 MustChange/rewrite, 6 rewrite_recommended, 0 cosmetic-only; severity totals are 5 Blocker, 18 Major, 1 Minor. Severity is not evidence of an outage. The dated Word companion (./Usuarios_Recommendations_10142026.docx) contains the same final report.
+Verification and safety boundary
+• The VS Code test tool was restricted to the standalone EstadoServicio test: No tests found.
+This is not a passing MSTest result.
+• Compiling the actual EstadoServicio source in memory and invoking its latch three times
+returned true,false,false: PASS, only an isolated source smoke, not the suite.
+• The Framework v4 MSBuild executable exists outside PATH. Building the SDK-style test project
+failed MSB4041 before compilation. Its advice about old XML namespaces is not an appropriate source fix; use a modern SDK/MSBuild with net48 targeting support.
+• No modern .NET SDK, deployment DLLs or approved internal feed/version were available.
+Clean build, package compatibility, deployed schema, test pass rate and coverage remain unverified.
+• Do not run the default test suite before USR-20 is fixed: one discovered test invokes real
+repository DML. No service was started and no database was contacted during this audit.
+• Source Git status was clean after verification; all changes are audit documents outside that repo.
+Dependency watch item: the reviewed shared host source still assigns ServiceName inside OnStart. Existing central GEN-14 tracks the SCM frozen-name risk and required runtime confirmation. Check the actual deployed MUFG_T24 version/SCM behavior; no service was started here and no duplicate library finding is counted among USR-1..24.
+3. What's Already Good
+• Repository contracts (../../CMS/Usuarios/Aplicacion/Interfaces/Repositorios):
+all 25 repository interfaces separate application logic from concrete storage access.
+• OrquestadorProcesos.cs:24 (../../CMS/Usuarios/Aplicacion/Orquestador/OrquestadorProcesos.cs:24):
+constructor injection and ordered sequential execution make process behavior independently testable.
+• SolicitudesConfirmadasSubProcesos.cs:37 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/SolicitudesConfirmadasSubProcesos/SolicitudesConfirmadasSubProcesos.cs:37):
+the dispatch result is null-checked before invocation; do not flag a false-positive dereference.
+• Comunes.cs:28 (../../CMS/Usuarios/Aplicacion/Comunes/Comunes.cs:28):
+date parsing uses explicit accepted formats and invariant culture rather than machine culture.
+• EstadoServicio.cs:20 (../../CMS/Usuarios/Aplicacion/Services/EstadoServicio.cs:20):
+the initialization latch uses an atomic operation. Successful-initialization recovery is a separate contract question, not proof that the latch is non-thread-safe.
+• LoggerService.cs:15 (../../CMS/Usuarios/Aplicacion/Services/Log/LoggerService.cs:15) and
+EmailService.cs:18 (../../CMS/Usuarios/Aplicacion/Services/Email/EmailService.cs:18): thin interface-backed adapters localize shared logging/mail dependencies.
+4. Findings by Project (low/no-dependency -> high dependency)
+4.1 AplicacionUsuarios (Tier 0)
+MustChange / Rewrite
+USR-1 - Process failures are lost in successful cycle outcomes
+Severity: Major. Category: MustChange/rewrite. Checklist: sections 3, 5.
+Locations: OrquestadorProcesos.cs:47 (../../CMS/Usuarios/Aplicacion/Orquestador/OrquestadorProcesos.cs:47), OrquestadorProcesos.cs:58 (../../CMS/Usuarios/Aplicacion/Orquestador/OrquestadorProcesos.cs:58), OperacionServicio.cs:128 (../../CMS/Usuarios/Aplicacion/Services/OperacionServicio.cs:128), and SolicitudesConfirmadasProceso.cs:64 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/SolicitudesConfirmadasProceso.cs:64).
+Code block (csharp)
+await proceso.EjecutarAsync(); // Boolean discarded; same for initial processes.
+// Orchestrator subsequently returns true.
+_ = await _operaciones.EjecutaAsync(_estado.EstadoInicializacion());
+// Service subsequently returns true.
+General processes have real false-return failure paths, for example an exception caught in ActualizaClientesProceso. The orchestrator ignores those outcomes. Confirmed-request processing also logs a false subprocess result but returns true after the loop. Consequently a failed operation can appear as an entirely successful cycle even when its local error log exists.
+Fix: define success/failure/skipped semantics, preserve the aggregate outcome, and propagate it through OperacionServicio. If independent processes must continue, use an explicit aggregate; if a downstream process requires earlier success, stop it. The business dependency policy must be confirmed rather than invented.
+Code block (csharp)
+bool succeeded = true;
+foreach (var proceso in orderedProcesses)
+{
+    bool processSucceeded = await proceso.EjecutarAsync();
+    succeeded = processSucceeded && succeeded;
+}
+return succeeded;
+The snippet illustrates continue-and-report only. First distinguish a configured-disabled step: LongevidadUsuarioProceso currently returns false for that case too. Benefit: truthful cycle status and reliable recovery decisions. Regression: failed general/initial/subprocess cases propagate failure; disabled optional steps are explicitly skipped; required order is preserved.
+Suggested JIRA: USR-1, High.
+USR-2 - Recipient address is incorrectly used as the production sender
+Severity: Major. Category: MustChange/rewrite. Checklist: section 3.
+Locations: ActualizaEmailProceso.cs:103 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/ActualizaEmailProceso.cs:103) and ValidaReglasUsuariosProceso.cs:116 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosIniciandoServicio/ValidaReglasUsuariosProceso.cs:116).
+Code block (csharp)
+string mailFrom = string.IsNullOrEmpty(mailSenderDev) ? mailToProd : mailSenderDev;
+Both flows read and validate the configured production sender, then select the production recipient instead when there is no test-sender override. The resulting message's CorreoOrigen does not honor USUARIOS_EMAIL_FROM.
+Code block (csharp)
+string mailFrom = string.IsNullOrEmpty(mailSenderDev) ? mailSenderProd : mailSenderDev;
+Fix both occurrences and preserve existing recipient/subject override behavior. Benefit: correct sender identity; avoids potential SMTP sender-policy rejection and misleading From addresses. Exact SMTP consequences depend on deployment. Regression: production sender differs from recipient; without a test override, verify CorreoOrigen and Para separately in both flows.
+Suggested JIRA: USR-2, High.
+USR-3 - SQL preprocessing splits and alters quoted values
+Severity: Major. Category: MustChange/rewrite. Checklist: sections 3, 8.
+Location: ProcesarScriptsProceso.cs:146 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/ProcesarScriptsProceso.cs:146).
+Code block (csharp)
+var sql1 = Regex.Replace(sql, @"/\*.*?\*/", "", RegexOptions.Singleline);
+var sql2 = Regex.Replace(sql1, @"--.*?$", "", RegexOptions.Multiline);
+// A GO-removal regex follows.
+var statements = sql3.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
+Valid SQL such as UPDATE dbo.Example SET Note = 'a;b' WHERE Id = 1; is split inside the quoted value. Comment markers inside quoted values are also removed as if they were SQL comments. This is a definite parser-correctness issue, not a claim of an exploitable injection boundary.
+Fix: replace regex/string splitting with compatible, approved T-SQL tokenization/parsing. Validate complete batches and allowed statement types before execution; preserve string literals, escaped quotes, identifiers and real comments. Do not silently broaden the allowed SQL language.
+Recommended implementation shape (pseudocode; parser selection is a separate dependency decision):
+Code block (text)
+parse the original batch without rewriting literal content
+reject parsing errors or unsupported statement nodes before executing anything
+execute only the validated, original statement spans
+Benefit: SQL values remain intact and preprocessing does not create malformed partial work. Regression: semicolons/doubled quotes/comment markers inside literals, actual comments, multiline batches and rejection of unsupported syntax without executing an accepted prefix.
+Suggested JIRA: USR-3, High.
+USR-5 - Build depends on unversioned machine-local shared DLLs
+Severity: Blocker for reproducible clean builds; not a deployed-runtime failure claim. Category: MustChange/rewrite. Checklist: section 11. Standing pattern: GEN-1 in the control document (./_ORCHESTRATION.md).
+Locations: AplicacionUsuarios.csproj:76 (../../CMS/Usuarios/Aplicacion/AplicacionUsuarios.csproj:76), InfraestructuraUsuarios.csproj:74 (../../CMS/Usuarios/Infraestructura/InfraestructuraUsuarios.csproj:74), Usuarios.csproj:74 (../../CMS/Usuarios/Usuarios/Usuarios.csproj:74), Usuarios.csproj:77 (../../CMS/Usuarios/Usuarios/Usuarios.csproj:77), and PruebasUnitarias.csproj:25 (../../CMS/Usuarios/PruebasUnitarias/PruebasUnitarias.csproj:25).
+Code block (xml)
+<Reference Include="MUFG_T24">
+  <HintPath>D:\ServiceCMS\MUFG_T24.dll</HintPath>
+</Reference>
+Four MUFG_T24 references and one SimpleInjector reference rely on machine provisioning. Both absolute targets were absent locally. No nuget.config or MUFG package archive was found across the portfolio. This is a raw-file reference, not evidence of an effective package-feed restore. Production csproj metadata and test csproj metadata were read fully for this confirmation.
+Fix/benefit: adopt the centralized GEN-1 versioned internal-package solution rather than patching one workstation path. Pin/restore the actual supported shared-library version and use an approved versioned SimpleInjector package. Recommended reference shape, with deliberately unresolved values until the approved package exists:
+Code block (xml)
+<PackageReference Include="APPROVED_INTERNAL_PACKAGE_ID" Version="APPROVED_PINNED_VERSION" />
+No package ID/version is invented by this audit. Regression/acceptance: a clean approved agent restores and builds net48/x86 without pre-populating D:\ServiceCMS, then runs the isolated unit suite after USR-20. Integration tests require a separately approved disposable database. Confirm .slnx and Framework targeting-pack support. Suggested JIRA: USR-5, Blocker.
+USR-9 - Failed persistence results do not stop success or acknowledgement
+Severity: Major. Category: MustChange/rewrite. Checklist: sections 3, 5, 8.
+Locations: ActualizaClientesProceso.cs:56 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/ActualizaClientesProceso.cs:56), ReemplazoTokensProceso.cs (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/ReemplazoTokensProceso.cs), PlantillaService.cs (../../CMS/Usuarios/Aplicacion/Services/Plantilla/PlantillaService.cs), and the user subprocess implementations (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/SolicitudesConfirmadasSubProcesos/SubProcesos).
+Current: repository Task<bool> results are awaited individually or via Task.WhenAll and discarded. Client/account replacement, email/token mutation, user/permission mutation, longevity updates and eight template task groups can continue without testing a reported failure. The concrete wrappers log and return Exito; shared nonquery failures can produce false rather than throw. Some explicit procedure errors do throw; not every failure is swallowed.
+Code block (text)
+await repository.MutateAsync(...)   // returned false is ignored
+continue dependent work / report success
+Concrete backup example, PlantillaService.cs:94 (../../CMS/Usuarios/Aplicacion/Services/Plantilla/PlantillaService.cs:94):
+Code block (csharp)
+await Task.WhenAll(
+    _hist.InsertRespaldoPlantillasAsync(cliente),
+    _tomi.InsertHistoricoPlantillasAsync(cliente)
+);
+Fix: consume each outcome at the application boundary; on failed backup/mutation, do not perform dependent destructive work or acknowledge completion. Preserve the failed operation and safe correlation for reconciliation. Use existing result contracts or a clear typed outcome, not a success default. Coordinate with USR-1 and query failure handling in USR-13.
+Recommended flow (pseudocode, not a new API):
+Code block (text)
+outcomes = await required backups/mutations
+if any failed: report failure; stop dependent work; retain item for recovery
+only after verified success: perform next dependent step / acknowledge
+Benefit / regression: a false result fails the appropriate item/cycle and remains retriable. Inject false and thrown failures at each store and template backup stage; verify no terminal acknowledgement, no later dependent mutation, and no duplicate effect on retry. Suggested JIRA: USR-9, High.
+USR-10 - Delete, insert and source acknowledgement race each other
+Severity: Blocker. Category: MustChange/rewrite. Checklist: sections 3, 8.
+Locations: ActualizaClientesProceso.cs:56 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/ActualizaClientesProceso.cs:56) and ActualizaCuentasProceso.cs:57 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/ActualizaCuentasProceso.cs:57).
+Current: both processes start delete, replacement insert and TOMSER processed-state update in the same Task.WhenAll (the client path includes both TOMI and TOMSER updates). Concrete repositories execute separate procedures on separate connections. Contextual client/account DELETE definitions commit independently. Task.WhenAll neither orders these calls nor makes them one transaction. A late delete can remove the inserted row, and source acknowledgement can precede a failed replacement.
+Code block (csharp)
+await Task.WhenAll(
+    _cmsCliente.DeleteAsync(cliente.SATM02COD),
+    _cmsCliente.InsertAsync(cliente),
+    _tomiCliente.UpdateAsync(cliente.SATM02COD),
+    _tomserCliente.UpdateAsync(cliente.SATM02COD)
+);
+Fix: replace atomically within the destination using an approved transaction/upsert contract, verify success, then acknowledge the source. Define idempotent replay and reconciliation for acknowledgement failure; do not assume a distributed transaction is available.
+Code block (text)
+await atomic destination replacement
+require verified success
+await source acknowledgement; on failure retain durable reconciliation state
+Benefit / regression: no missing destination after acknowledged replacement. Use controllable task completion gates to force delete-last, insert failure and acknowledgement failure; integration tests verify rollback/uniqueness on a disposable database. Suggested JIRA: USR-10, Blocker.
+USR-11 - A partially accepted SQL request can be marked fully applied
+Severity: Major. Category: MustChange/rewrite. Checklist: sections 3, 8.
+Location: ProcesarScriptsProceso.cs:65 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/ProcesarScriptsProceso.cs:65).
+Current: validation separates accepted and NoExecuted statements. The accepted subset is executed; any nonempty execution-result list causes the parent request to be marked applied before rejected statements are handled. A mixed-validity batch can therefore become completed although not all requested statements ran. This is established independently of unverified per-row SQL error semantics.
+Code block (csharp)
+var result = await _scriptEjecuta.EjecutaScriptsPendientesAsync(sqlExecute.DtExecutedOk);
+if (result.Count>0)
+{
+    // A log call precedes this acknowledgement.
+    await _scriptObtiene.UpdateAplicadoAsync(item.Id_Script);
+}
+Fix: reject the complete request before mutation if any statement is invalid, unless an explicitly approved partial-result state/contract is introduced. Mark fully applied only when every required statement is accepted and confirmed successful. Align with USR-3 and USR-15.
+Code block (text)
+parse/validate whole request
+if any rejected statement: report rejected request; execute nothing
+otherwise execute approved batch; verify all outcomes; only then mark fully applied
+Benefit / regression: rejected work remains visible and recoverable. Mixed accepted/rejected batches must not execute or acquire a fully-applied status; empty/failed execution results must not acknowledge success. Suggested JIRA: USR-11, High.
+USR-12 - An absent IP-lock parameter is dereferenced in memory
+Severity: Major. Category: MustChange/rewrite. Checklist: sections 3, 11.
+Locations: TomiParametrosSistemaRepository.cs:55 (../../CMS/Usuarios/Infraestructura/Repositorios/Tomi/TomiParametrosSistemaRepository.cs:55) and DesbloquearIPsProceso.cs:49 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/DesbloquearIPsProceso.cs:49).
+Current: the repository returns Data.FirstOrDefault(); the process uses item.VALOR without a null check. A successful query with no row returns null. This is materialized in-memory code, not a null-safe EF left-join projection. The outer catch converts the resulting exception to false; USR-1 then loses the failure.
+Code block (csharp)
+var item = await _tomiParametros.ObtenerValorDesbloqueoIpAsync();
+if (item.VALOR == "0")
+Fix: first distinguish provider failure from not-found (USR-13), then explicitly validate the required parameter before using it. Surface a named missing-configuration outcome; do not silently substitute an unlock value.
+Code block (text)
+require successful query
+if no parameter row: report named configuration error and fail this process
+validate value; only then evaluate unlock policy
+Benefit / regression: empty successful query, failed query and blank/invalid parameter value produce distinct actionable failures and no unintended unlock. Suggested JIRA: USR-12, High.
+USR-14 - Existing permissions are deleted before replacements are read
+Severity: Blocker. Category: MustChange/rewrite. Checklist: sections 3, 8.
+Location: BaseUsuarioSubProcesos.cs:126 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/SolicitudesConfirmadasSubProcesos/SubProcesos/Base/BaseUsuarioSubProcesos.cs:126).
+Current: the shared user subprocess base deletes CMS, TOMI and TOMSER permissions before reading the new permission set. A provider failure can become an empty list through the query adapter. Existing access is then erased without a verified replacement, while ignored results can still allow the parent request to complete.
+Current excerpt (intervening diagnostic lines omitted):
+Code block (csharp)
+await _cmsPermiso.DeleteAsync(item.SATM04LOG);
+await _tomserPermiso.DeleteAsync(item.SATM04LOG);
+await _tomiPermiso.DeleteAsync(item.SATM04LOG);
+var permisos = await _tomserSolicitud.ObteneUsuarioPermisosAsync(item.SATM04LOG, item.ID_SOLICITUD);
+Fix: read and validate the intended set before any deletion; distinguish an intentionally empty permission set from an unavailable read. Atomically replace per store, check every outcome, and define cross-store progress/recovery and idempotency. A global transaction is not presumed.
+Code block (text)
+read intended permissions with strict failure distinction
+validate explicit empty-set policy
+atomically replace each store; persist progress and verify outcomes
+complete request only when the agreed consistency contract is satisfied
+Benefit / regression: read failure preserves existing access; failed writes cannot silently complete the request. Exercise each store failing before/after replacement, explicit empty-set policy, compensation/retry and duplicate requests. Suggested JIRA: USR-14, Blocker.
+USR-17 - Per-tick database execution state is finalized only on success
+Severity: Major. Category: MustChange/rewrite. Checklist: sections 3, 6. Standing pattern: GEN-7 in the control document (./_ORCHESTRATION.md).
+Location: OperacionServicio.cs:73 (../../CMS/Usuarios/Aplicacion/Services/OperacionServicio.cs:73), with early exits at :102/:122 and success-only termination at :132.
+Current: execution is marked before the business-day/time-window gates and orchestration. Skipped, failed or cancelled paths do not perform the matching per-tick finalization. Host shutdown cleanup happens at another lifecycle boundary and does not close each such tick.
+Current success-path excerpts (gates and orchestration intervene):
+Code block (csharp)
+await _controlServicio.ActualizaEJecucion(_configuracion.NombreServicio,ct);
+// Early returns/errors bypass the later success-only call:
+await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio,ct);
+Fix: pair successful execution marking with bounded finalization in a finally path; preserve the original failure/cancellation and separately surface cleanup failure. Define skipped status explicitly rather than reporting business success. Check the finalization result (USR-18).
+Code block (text)
+mark execution and record that it succeeded
+try: evaluate gates and run cycle, preserving its outcome
+finally: if marked, finalize with bounded cleanup token and check result
+report cleanup failure separately without replacing the original cause
+Benefit / regression: state is consistent after outside-window/nonbusiness-day exits, process errors and cancellation. Test each path plus cleanup failure without masking its original cause. Suggested JIRA: USR-17, High.
+USR-24 - Inactivity audit reason does not use the configured threshold
+Severity: Minor. Category: MustChange/rewrite. Checklist: section 3.
+Location: LongevidadUsuarioProceso.cs:60 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosIniciandoServicio/LongevidadUsuarioProceso.cs:60) selects the configured USUARIO_INACTIVAR threshold; :74 always persists a reason asserting 90 days. The explanation is false for another valid configured threshold.
+Current policy/audit mismatch:
+Code block (text)
+selection: fechaSistema.AddDays(USUARIO_INACTIVAR * -1)
+persisted explanation: maximum of 90 days
+Fix: format the audit reason using the actual validated threshold, preserving status/type codes and the selected policy. Benefit / regression: persisted explanations match the rule actually applied; test 90 and a different allowed value without changing deactivation criteria.
+Code block (text)
+validatedDays = current settings.USUARIO_INACTIVAR
+use validatedDays for both selection boundary and persisted explanation
+Suggested JIRA: USR-24, Low.
+Rewrite Recommended
+USR-4 - 44 diagnostic messages pass unresolved placeholders
+Severity: Major. Category: rewrite_recommended. Checklist: section 5.
+Example location: ActualizaClientesProceso.cs:55 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/ActualizaClientesProceso.cs:55). Adapter contract: ILoggerService.cs:8 (../../CMS/Usuarios/Aplicacion/Interfaces/Servicios/ILoggerService.cs:8). The exhaustive-read cross-check found 44 matching lines in 13 files.
+Code block (csharp)
+_log.Info("Actualiza_Clientes|Procesando Cliente: {cliente.SATM02COD}");
+The interface accepts one string. No values are supplied for template binding, so the braces are literal. Affected flows include two user subprocesses and their base, client/account/email/script processing, confirmed requests, and startup checks. See the tracker for exact examples.
+Fix: for safe non-sensitive metadata, interpolate values; alternatively evolve the adapter to support real structured arguments and consistent redaction. Do not bulk-add $: some messages contain SQL, email, permissions or user names that must not become newly exposed payload logs.
+Code block (csharp)
+_log.Info($"Actualiza_Clientes|Solicitudes de Clientes encontradas: {clientes.Count}");
+Benefit: usable counts and correlation instead of literal source expressions, without exposing customer data. Regression: assert safe metadata is resolved and sensitive data remains excluded. Suggested JIRA: USR-4, Medium.
+USR-6 - Four user subprocesses repeat the same template-update policy
+Severity: Major. Category: rewrite_recommended. Checklist: section 12.
+Locations: AltaUsuarioSubProceso.cs:86 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/SolicitudesConfirmadasSubProcesos/SubProcesos/AltaUsuarioSubProceso.cs:86), ModificacionUsuarioSubProceso.cs:79 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/SolicitudesConfirmadasSubProcesos/SubProcesos/ModificacionUsuarioSubProceso.cs:79), ReposicionTokenSubProceso.cs:89 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/SolicitudesConfirmadasSubProcesos/SubProcesos/ReposicionTokenSubProceso.cs:89), TraspasoTokenSubProceso.cs:99 (../../CMS/Usuarios/Aplicacion/Orquestador/ProcesosGenerales/SolicitudesConfirmadasSubProcesos/SubProcesos/TraspasoTokenSubProceso.cs:99).
+Code block (csharp)
+foreach (var formato in new[] { "FXD", "FXT", "FXI" })
+{
+    await _plantillaService.ActualizarPlantillasAsync(item.SATM04LOG, p.SATM02COD, formato);
+}
+Exactly four occurrences in four files repeat format selection and the same orchestration call. A format-policy change requires editing every handler.
+Fix: extract a supported-format update operation in the existing template service or a protected shared application helper. Preserve ordering and current call cardinality, including repeated permissions, until business rules explicitly authorize de-duplication.
+Code block (text)
+for each permission:
+    await templateService.UpdateSupportedFormats(userLogin, permission.ClientId)
+Keep token-transfer-specific template removal in its handler. Benefit: one policy definition without a new global utility/framework. Regression: each handler invokes the same three formats in the same order; transfer removal still occurs at its existing boundary. Suggested JIRA: USR-6, Medium.
+USR-7 - Cancellation stops at the application orchestration boundary
+Severity: Major. Category: rewrite_recommended. Checklist: section 6.
+Locations: OperacionServicio.cs:128 (../../CMS/Usuarios/Aplicacion/Services/OperacionServicio.cs:128) and IOperacionPrincipal.cs:15 (../../CMS/Usuarios/Aplicacion/Interfaces/OperacionPrincipal/IOperacionPrincipal.cs:15).
+Code block (csharp)
+Task<bool> EjecutaAsync(bool iniciandoServicio);
+// Caller has a CancellationToken but cannot pass it:
+_ = await _operaciones.EjecutaAsync(_estado.EstadoInicializacion());
+The top-level token reaches parameter and service-control calls but not the general/initial/ user subprocess or repository contracts. A stop request cannot cooperatively cancel their loops through these interfaces. This does not prove a shared-host timer race or unbounded DB timeout.
+Fix: thread a token through the existing contracts, check it between records/steps, pass it to supported I/O, and distinguish cancellation from ordinary failures.
+Code block (csharp)
+Task<bool> EjecutaAsync(bool iniciandoServicio, CancellationToken cancellationToken);
+Use a separately bounded cleanup token for state finalization, preserving the original failure. Benefit: predictable shutdown and fewer unwanted post-stop mutations. Regression: cancellation between records prevents starting new work and remains distinguishable from failure; cleanup still runs according to the agreed recovery contract. Suggested JIRA: USR-7, Medium.
+USR-8 - Malformed nonblank configuration silently becomes operational defaults
+Severity: Major. Category: rewrite_recommended. Checklist: section 11.
+Locations: Extensiones.cs:43 (../../CMS/Usuarios/Aplicacion/Comunes/Extensiones.cs:43), Extensiones.cs:48 (../../CMS/Usuarios/Aplicacion/Comunes/Extensiones.cs:48), MapearValidarParametros.cs:19 (../../CMS/Usuarios/Aplicacion/Comunes/MapearValidarParametros.cs:19) and OperacionServicio.cs:82 (../../CMS/Usuarios/Aplicacion/Services/OperacionServicio.cs:82).
+Code block (csharp)
+return TimeSpan.TryParse(defaultValue, out var resultDefault) ? resultDefault : TimeSpan.Zero;
+The shared production parameter loader already validates every requested key is present and nonblank. Missing-required-key/null-dictionary allegations are therefore excluded for that path. However, a nonblank malformed time silently becomes midnight; invalid integer parsing becomes zero. Presence validation does not validate format/range. The mapper does not distinguish invalid input from configured values before assigning the singleton settings used for window checks and inactivity policies. A malformed operation-end value can make normal ticks appear out of hours; zero disables the configurable inactivity branch. These are configuration-risk paths, not evidence deployed configuration is bad.
+Fix: retain shared required-key checks and add format/range validation at the mapping boundary; parse operational time values with explicit culture/format; retain defaults only for explicitly optional fields and record why. Preserve the last valid snapshot or fail the cycle according to an agreed policy; do not silently invent a fallback.
+Code block (text)
+parse into a new settings snapshot
+collect missing/malformed/range errors with key names only
+log and reject invalid required settings before publishing the snapshot
+Benefit: actionable configuration failures rather than misleading skip behavior. Regression: shared missing-key rejection, malformed nonblank values, valid midnight, reversed/overnight windows and explicitly disabled inactivity settings. Overnight-window support is a requirement question, not automatically a current defect. Suggested JIRA: USR-8, Medium.
+USR-23 - First initialization attempt is latched without a recovery policy
+Severity: Major. Category: rewrite_recommended. Checklist: sections 3, 6.
+Locations: EstadoServicio.cs:20 (../../CMS/Usuarios/Aplicacion/Services/EstadoServicio.cs:20) and OperacionServicio.cs:128 (../../CMS/Usuarios/Aplicacion/Services/OperacionServicio.cs:128).
+Current: the atomic singleton latch changes before orchestration is invoked. A failed startup-labelled step is not selected again in this process lifetime. Thread safety is sound, but first attempt is not the same as successfully completed initialization.
+Code block (csharp)
+return Interlocked.CompareExchange(ref _init, 1, 0) == 0;
+// Caller consumes this result before the orchestration result is known:
+_ = await _operaciones.EjecutaAsync(_estado.EstadoInicializacion());
+Fix: agree whether startup steps are at-most-once attempts or recoverable required work. Record explicit per-step outcome and alert on incomplete initialization; introduce retries only after idempotency and recovery have been designed. Do not reset the latch blindly after a partially committed cross-store operation.
+Code block (text)
+track not-attempted / in-progress / completed / failed for required startup steps
+on failure: surface incomplete initialization and follow owner-approved recovery
+only retry steps whose idempotency/reconciliation policy permits it
+Benefit / regression: operators can distinguish attempted from completed startup maintenance. Test failure/cancellation midway, subsequent ticks and process restart under the approved policy. This is a recovery-design recommendation, not an invented requirement that retries must occur. Suggested JIRA: USR-23, Medium.
+Nice to Rewrite if Time Permits
+No separate cosmetic-only finding is promoted. Prioritize confirmed defects and operational contracts over renaming database-shaped DTO properties or changing the host.
+4.2 InfraestructuraUsuarios (Tier 1)
+All 28 files / 2,321 lines read. Mutation callers, null materialization and transaction ordering are covered by USR-9/10/12/14 rather than duplicated as separate repository tickets.
+MustChange / Rewrite
+USR-13 - Failed queries are exposed as empty or partial business data
+Severity: Major. Category: MustChange/rewrite. Checklist: sections 5, 8. Standing pattern: GEN-11 in the control document (./_ORCHESTRATION.md).
+Locations: TomserSolicitudRepository.cs:40 (../../CMS/Usuarios/Infraestructura/Repositorios/Tomser/TomserSolicitudRepository.cs:40), TomserSolicitudRepository.cs:81 (../../CMS/Usuarios/Infraestructura/Repositorios/Tomser/TomserSolicitudRepository.cs:81) and CmsScriptsEjecutaRepository.cs:50 (../../CMS/Usuarios/Infraestructura/Repositorios/Cms/CmsScriptsEjecutaRepository.cs:50). The full read found 12 return-result.Data lines, including client/account and queued-work reads.
+Code block (csharp)
+return result.Data;
+Current: wrappers do not check Exito/Exception before returning Data. The reviewed shared query adapter can catch provider errors and return false with an initialized empty/partial list under the default non-strict mode. "No pending work" is not distinguishable from "could not read". Some explicit procedure-error results throw; do not claim every error is suppressed.
+Fix: enforce a failed-query contract before publishing Data, preserving the cause and safe context. Treat successful empty results as a separate domain state; ensure callers propagate failure and do not delete/acknowledge against unavailable input. Coordinate with the centralized shared-adapter fix, but retain correct local boundary behavior for its supported version.
+Code block (text)
+if provider outcome failed: propagate the original failure with safe context
+otherwise return Data, including a legitimately empty collection
+Benefit / regression: failed query cannot masquerade as empty work. Test provider failure, partial materialization, successful empty data and explicit procedure errors. Suggested JIRA: USR-13, High.
+USR-15 - Script caller and tracked SQL deployment contract disagree
+Severity: Major. Category: MustChange/rewrite. Checklist: sections 8, 11. Standing pattern: GEN-13 in the control document (./_ORCHESTRATION.md).
+Location: CmsScriptsEjecutaRepository.cs:35 (../../CMS/Usuarios/Infraestructura/Repositorios/Cms/CmsScriptsEjecutaRepository.cs:35). Context: tracked executor SQL (../../StoredProcedures/MWD_DB/DBMDW/CMS/Usuarios/Bot/011%20MUFG_MX2_EjecutaScriptsPendientes.sql).
+Current: C# sends structured @tblScriptsPendientesType with TypeName dbo.ScriptsPendientesType and consumes statement-result rows. The tracked SQL procedure instead declares scalar @Script NVARCHAR(MAX), @FilasAfectadas INT OUTPUT. No matching table-type definition/parameter was found in the searched SQL tree. These are incompatible source contracts. The deployed database may contain a different version; no live schema was inspected.
+Current incompatible contract excerpts:
+Code block (csharp)
+var paraTableType = new SqlParameter("@tblScriptsPendientesType", SqlDbType.Structured)
+{
+    TypeName = "dbo.ScriptsPendientesType",
+    // DataTable value follows in the current source.
+};
+Code block (sql)
+@Script NVARCHAR(MAX),
+@FilasAfectadas INT OUTPUT
+Fix: obtain the DBA-approved deployed definition, select one versioned parameter/result contract, align caller and migration together, and add a deployment contract test including table type, parameter metadata, errors and per-statement completion semantics. Do not change one side based on a guessed production definition.
+Code block (text)
+version approved caller + procedure + table type + result contract together
+verify parameter metadata and result/error semantics on a clean disposable database
+reject deployment if either side has an incompatible contract
+Benefit / regression: an approved clean database accepts the caller and returns the exact expected results. Validate outside production on a disposable database; retain deployment and rollback instructions. Suggested JIRA: USR-15, High.
+4.3 Usuarios Host (Tier 2)
+All 6 files / 566 lines read. Relevant shared-base startup/tick contracts were verified as context. The base validates initialized host identity and serializes ticks; neither missing host PID initialization nor overlapping shared timer ticks is asserted as a new local defect.
+MustChange / Rewrite
+USR-16 - DI captures a configuration clone before process identity is loaded
+Severity: Blocker. Category: MustChange/rewrite. Checklist: sections 3, 4, 11. Related standing pattern: GEN-8, with a distinct local object-identity cause.
+Locations: ServiceHost.cs:99 (../../CMS/Usuarios/Usuarios/ServiceHost.cs:99), ServiceHost.cs:202 (../../CMS/Usuarios/Usuarios/ServiceHost.cs:202), ServiceHost.cs:217 (../../CMS/Usuarios/Usuarios/ServiceHost.cs:217).
+Code block (csharp)
+_containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Singleton);
+// Verify constructs the registered graph before process parametrization.
+_containerDI.Verify();
+// Later: the original host configuration is populated.
+_configuracionBase = await _parametrizacion.ObtenerProcesoActualAsync(_configuracionBase);
+Current: container verification creates the singleton clone first. Shared Clone is MemberwiseClone; parametrization later mutates/returns the original host object, including PID and process metadata. The clone remains separate with its earlier nullable PID. Shared startup validation checks the original object, not the application's injected singleton. Application alert paths dereference the clone's Pid.Value and can fail despite valid host identity. This relies on the reviewed source and Simple Injector verification semantics; deployed DLL version/runtime reproduction was unavailable.
+Fix: initialize identity before constructing the injected snapshot, or intentionally register the same initialized instance. Preserve any required thread-safe refresh/snapshot semantics and verify the actual resolved application configuration. Do not supply a dummy PID, suppress the exception, disable verification, or remove shared startup validation.
+Code block (text)
+load/validate process identity
+construct/register the intended initialized configuration instance or snapshot
+verify container; resolve operation; validate the resolved PID/metadata
+only then allow ticks
+Benefit / regression: host and application use the same valid process identity. Add a composition-root startup test: verify graph, initialize identity in production order, resolve the operation, and assert the resolved PID/metadata match the host before testing alert paths. Suggested JIRA: USR-16, Blocker.
+USR-18 - Service-state booleans are discarded before success is logged
+Severity: Major. Category: MustChange/rewrite. Checklist: sections 3, 5. Standing pattern: GEN-9 in the control document (./_ORCHESTRATION.md).
+Locations: ServiceHost.cs:221 (../../CMS/Usuarios/Usuarios/ServiceHost.cs:221), ServiceHost.cs:281 (../../CMS/Usuarios/Usuarios/ServiceHost.cs:281), ServiceHost.cs:284 (../../CMS/Usuarios/Usuarios/ServiceHost.cs:284), and OperacionServicio.cs:132 (../../CMS/Usuarios/Aplicacion/Services/OperacionServicio.cs:132).
+Current: startup/shutdown port-state calls and termination return values are awaited but not checked; shutdown logs successful database termination afterwards. Reviewed shared compatibility paths can return false. Execution marking is different: the reviewed shared method throws on failure, so it is not included as another ignored-boolean example.
+Code block (csharp)
+await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+// Followed by a success log regardless of the returned outcome.
+Fix: branch on each result and report accurate startup/cleanup outcome using repository-standard logging/notification. Coordinate startup refusal/retry with the service-control contract; preserve the original shutdown cause if bounded cleanup also fails.
+Code block (text)
+outcome = await state update
+if outcome failed: emit standard failure notification and preserve failed state
+else: emit success message
+Benefit / regression: false state updates cannot produce success-shaped logs. Test false, throw and cancellation outcomes at startup, per-tick completion and shutdown. Suggested JIRA: USR-18, High.
+4.4 PruebasUnitarias (Tier 2)
+All 22 files / 2,191 lines read. The test project references application/infrastructure, not the host; it does not exercise the actual DI startup graph. Assertion counts do not establish coverage.
+MustChange / Rewrite
+USR-19 - The ordering test verifies mocks never placed in its process collection
+Severity: Major. Category: MustChange/rewrite. Checklist: section 13.
+Location: EjecutaOrquestadorProcesosTests.cs:49 (../../CMS/Usuarios/PruebasUnitarias/Orquestador/EjecutaOrquestadorProcesosTests.cs:49).
+Current: three mocks receive configured order/expected calls, but their collection entries are commented out. Only a different process is passed to the orchestrator. The test nevertheless verifies all three unused mocks executed once, so verification fails if reached. It also does not assert actual execution order.
+Current collection excerpt:
+Code block (csharp)
+var procesos = new List<IProcesosGenerales>
+{
+    //procesoGeneral1.Object,
+    //procesoGeneral2.Object,
+    //procesoGeneral3.Object,
+    CrearServicio2()
+};
+Fix: supply the three mocks in deliberately unsorted order, record execution callbacks and assert the expected sequence. Keep real-process behavior in a separately scoped test. Benefit / regression: the test detects an ordering regression and passes for the intended implementation; cover initial/noninitial selection and failed/skipped outcomes.
+Code block (text)
+inject mocks in deliberately unsorted order
+record each execution callback
+assert ordered callback sequence and exactly-once calls to those injected mocks
+Suggested JIRA: USR-19, High.
+USR-20 - A default unit test executes live repository DELETE/INSERT statements
+Severity: Blocker. Category: MustChange/rewrite. Checklist: sections 8, 13.
+Locations: ProcesarScriptsProcesoTests.cs:32 (../../CMS/Usuarios/PruebasUnitarias/ProcesosGenerales/ProcesarScriptsProcesoTests.cs:32) and ProcesarScriptsProcesoTests.cs:128 (../../CMS/Usuarios/PruebasUnitarias/ProcesosGenerales/ProcesarScriptsProcesoTests.cs:128).
+Current: an ordinary TestMethod calls the helper constructing CmsScriptsEjecutaRepository from real configuration. Its fixture contains DELETE/INSERT statements against CMS tables and a fixed client identifier. There is no explicit opt-in, disposable-target guard or rollback boundary in the test. Default discovery can therefore cause database mutations when dependencies are provisioned. The audit did not execute it or assume its configured target is production.
+Current real-repository construction:
+Code block (csharp)
+var _cmsRepoEjecutaReal = new CmsScriptsEjecutaRepository(_loggerServiceMock.Object);
+Fix: keep default unit tests mocked. Move database contract/execution checks into separately selected integration tests, require explicit opt-in and a disposable target verified fail-closed, seed synthetic fixtures and guarantee cleanup. A category alone is not sufficient unless runner configuration excludes it by default and target checks still prevent unsafe execution.
+Code block (text)
+default unit lane: use only repository mocks; no deployment configuration
+integration lane: require explicit opt-in AND approved disposable target before connection
+seed synthetic rows; execute contract checks; guarantee cleanup
+Benefit / regression: the default suite has no DB side effects; absent/wrong opt-in target fails before opening a connection. Only approved disposable fixtures run DML. Suggested JIRA: USR-20, Blocker; safety prerequisite for any broad test run.
+USR-22 - User subprocess tests explicitly expect success after failed writes
+Severity: Major. Category: MustChange/rewrite. Checklist: section 13.
+Locations: AltaUsuarioProcesoTest.cs:119 (../../CMS/Usuarios/PruebasUnitarias/ProcesosGenerales/SolicitudesConfirmadastSubProcesosTests/AltaUsuarioProcesoTest.cs:119), ReposicionTokenSubProcesoTests.cs:122 (../../CMS/Usuarios/PruebasUnitarias/ProcesosGenerales/SolicitudesConfirmadastSubProcesosTests/ReposicionTokenSubProcesoTests.cs:122), TraspasoTokenSubProcesoTests.cs:121 (../../CMS/Usuarios/PruebasUnitarias/ProcesosGenerales/SolicitudesConfirmadastSubProcesosTests/TraspasoTokenSubProcesoTests.cs:121).
+Current: four TOMSER insert/deactivation mocks across these three tests explicitly return false, followed by Assert.IsTrue(result). These assertions encode USR-9 instead of preventing it. They are not evidence that failed writes are recovered safely.
+Current Alta excerpts (fixture/setup lines intervene):
+Code block (csharp)
+_tomserUsuarioRepMock.Setup(x=>x.InsertAsync(It.IsAny<SolicitudesUsuariosCmsDto>())).ReturnsAsync(false);
+// After invoking the subprocess:
+Assert.IsTrue(result);
+Fix: correct the expected failure/recovery contract together with USR-9; assert that dependent work and terminal acknowledgement do not proceed after a failed required write. Keep separate all-success cases and cover failure of each store rather than only one configured branch. Benefit / regression: repairing production failure propagation no longer breaks a test that asserts the defect. Suggested JIRA: USR-22, High.
+Code block (text)
+required write returns false
+assert failed outcome / explicit recovery state
+verify no dependent mutation or terminal acknowledgement
+Rewrite Recommended
+USR-21 - Mock-based tests still depend on shared machine configuration and global logging
+Severity: Major. Category: rewrite_recommended. Checklist: sections 4, 13.
+Locations: TestBase.cs:49 (../../CMS/Usuarios/PruebasUnitarias/Common/TestBase.cs:49), TestBase.cs:98 (../../CMS/Usuarios/PruebasUnitarias/Common/TestBase.cs:98), and MSTestSettings.cs:1 (../../CMS/Usuarios/PruebasUnitarias/MSTestSettings.cs:1).
+Current: the shared fixture initializes real global configuration/logging and a common temp log destination. Method-level parallelization is enabled. Three derived initializers explicitly call the inherited setup as well, duplicating MSTest's inherited initialization. Mail tests depend on external test overrides and do not inspect sender payloads.
+Code block (csharp)
+LecturaConfguracionGeneral.Inicializar();
+Fix: keep application unit tests independent of real configuration/filesystem/global initialization; inject explicit settings and interface mocks. Give necessary integration tests isolated targets and lifecycle. Remove duplicate base initialization. Merely disabling parallelism does not resolve machine dependencies.
+Code block (text)
+create fresh settings, repository/logger/mail mocks for each unit test
+perform no machine-global setup
+parallelize isolated unit fixtures; separate guarded integration lifecycle
+Benefit / regression: offline tests run repeatably with different test order/parallelism and no deployment configuration. Assert sender/recipient separately and use synthetic fixture data. Suggested JIRA: USR-21, Medium.
+Regression-gap matrix
+These are acceptance additions for the findings above, not duplicate tickets or measured coverage.
+Surface	Existing limitation	Required regression evidence
+Cycle outcome / startup	Successful outcome commonly asserted; latch only tests three calls	Failure, skipped, cancellation, subsequent tick/restart under agreed recovery policy
+Client/account replacement	Completed-task mocks and call counts do not assert temporal order	Controlled interleavings, atomic replacement, acknowledgement last, replay
+User/permissions/templates	False writes expected to succeed; loose mocks often default false	Each store/read/backup failure; preserve existing permissions; no terminal acknowledgement
+SQL processing	Empty mocked result can still pass; one test uses real DB	Literal-safe parsing, mixed validity, empty/error result, exact deployed contract on disposable DB
+Mail	Any-message send count; external override dependence	Exact production/test sender and recipients in both flows
+Configuration / IP unlock	Presence of mocks does not cover format/range/not-found boundary	Shared required checks, malformed nonblank values, explicit missing row
+Host identity / state	Host is not referenced; operation tests inject a valid PID directly	Real container snapshot/identity order, failed state writes, per-tick bounded cleanup
+
+5. Architecture-Fit Note
+The evidenced workload fits a background worker; code-quality findings alone do not justify turning it into microservices or replacing Windows Service hosting. Apply the standing architecture question in the control document after validating the runtime dependencies.
+Option	Fit to known behavior	Trade-offs / evidence needed
+Modernize in place	Existing timer-driven administrative synchronization	Lowest behavioral disruption; first fix outcomes, sender/parser defects and build reproducibility
+Recoverable job/queue processing	Potentially useful if requests require durable retries and independent recovery	Need idempotency, ordering, transaction/reconciliation contracts and operational ownership
+Scheduled host/function	Possible if every cycle is bounded and deployment policy allows it	Need duration/volume, Windows/DLL dependencies, scheduling precision and cold-start constraints
+Full microservices rewrite	No supporting evidence from the current review	Separate business case, migration/consistency plan, platform budget and SLAs required
+
+Unknowns: SLAs, batch volumes, external-procedure duration, outage tolerance, deployment constraints, budget and recovery objectives. Sequence: fix real defects -> validate recovery/add regression tests -> reduce measured duplication -> evaluate hosting modernization. No rewrite mandate.
+6. JIRA-Ready Backlog
+Draft entries, not created tickets. Severity (checklist) and delivery priority are separate.
+ID	Title	Category	Project	File(s)	Priority
+USR-20	Isolate live-DML test behind disposable DB opt-in	MustChange/rewrite	PruebasUnitarias	ProcesarScriptsProcesoTests	Blocker: safe test execution
+USR-5	Replace machine-local shared DLL provisioning with approved pinned packages (GEN-1)	MustChange/rewrite	All four, metadata verified	Four csproj files	Blocker: reproducible build
+USR-16	Initialize the actual DI configuration identity before snapshot creation (GEN-8 variant)	MustChange/rewrite	Usuarios host	ServiceHost	Blocker
+USR-10	Replace clients/accounts atomically, acknowledge source last	MustChange/rewrite	Aplicacion / Infraestructura	ActualizaClientesProceso, ActualizaCuentasProceso and repositories	Blocker
+USR-14	Read validated permissions before atomic replacement and recover cross-store	MustChange/rewrite	Aplicacion / Infraestructura	BaseUsuarioSubProcesos and permission repositories	Blocker
+USR-1	Preserve failed/skipped process outcomes through the cycle	MustChange/rewrite	AplicacionUsuarios	OrquestadorProcesos, OperacionServicio, SolicitudesConfirmadasProceso	High
+USR-9	Stop dependent work and acknowledgement after failed persistence	MustChange/rewrite	AplicacionUsuarios	Mutation callers, PlantillaService, user/startup processes	High
+USR-13	Reject failed queries before exposing Data (GEN-11)	MustChange/rewrite	InfraestructuraUsuarios	Query repositories	High
+USR-15	Align script TVP/result caller and approved SQL deployment contract (GEN-13)	MustChange/rewrite	Infraestructura / DB deployment	CmsScriptsEjecutaRepository and SQL migration	High
+USR-2	Honor configured production sender in both mail flows	MustChange/rewrite	AplicacionUsuarios	ActualizaEmailProceso, ValidaReglasUsuariosProceso	High
+USR-3	Parse queued SQL without rewriting quoted values	MustChange/rewrite	AplicacionUsuarios	ProcesarScriptsProceso	High
+USR-11	Do not fully apply partially accepted SQL requests	MustChange/rewrite	AplicacionUsuarios	ProcesarScriptsProceso	High
+USR-12	Distinguish missing IP-lock parameter from failed query	MustChange/rewrite	Aplicacion / Infraestructura	DesbloquearIPsProceso, TomiParametrosSistemaRepository	High
+USR-17	Finalize execution state on skipped/failed/cancelled ticks (GEN-7)	MustChange/rewrite	AplicacionUsuarios	OperacionServicio	High
+USR-18	Check state-write outcomes before logging success (GEN-9)	MustChange/rewrite	Application / host	OperacionServicio, ServiceHost	High
+USR-19	Put verified mocks into the ordering test and assert sequence	MustChange/rewrite	PruebasUnitarias	EjecutaOrquestadorProcesosTests	High
+USR-22	Correct success expectations after false TOMSER mutation results	MustChange/rewrite	PruebasUnitarias	Alta, Reposicion, Traspaso tests	High
+USR-4	Resolve safe diagnostic metadata and redact payloads	rewrite_recommended	AplicacionUsuarios	44 log lines in 13 files	Medium
+USR-6	Centralize the four supported-format update loops	rewrite_recommended	AplicacionUsuarios	Four user subprocesses	Medium
+USR-7	Propagate cancellation through processing contracts	rewrite_recommended	AplicacionUsuarios	Execution/process/repository interfaces and implementations	Medium
+USR-8	Validate nonblank operational setting formats/ranges before publication	rewrite_recommended	AplicacionUsuarios	Extensiones, MapearValidarParametros, OperacionServicio	Medium
+USR-21	Remove live global configuration/logging from mock-based tests	rewrite_recommended	PruebasUnitarias	TestBase, derived setup and mail tests	Medium
+USR-23	Define and test explicit failed-initialization recovery policy	rewrite_recommended	AplicacionUsuarios	EstadoServicio, OperacionServicio, initial processes	Medium
+USR-24	Persist the actual inactivity threshold in audit reasons	MustChange/rewrite	AplicacionUsuarios	LongevidadUsuarioProceso	Low
+
+Delivery and sign-off gates
+1. Safety first: USR-20 before any broad test run; isolate unit setup and repair deterministic
+assertions (USR-19/21/22) alongside the relevant production changes.
+2. Reproducibility: provision approved pinned dependencies/modern build tooling (USR-5);
+confirm the DBA-owned deployed script contract before integration execution (USR-15).
+3. Reliability: fix injected identity, outcome propagation and state finalization
+(USR-16/1/9/13/17/18), with regression failures made explicit.
+4. Data correctness: implement replacement/recovery contracts (USR-10/14), SQL parsing and
+whole-request completion (USR-3/11), sender/configuration/IP and audit-reason fixes (USR-2/8/12/24). Business owners approve empty permissions and retry semantics.
+5. Maintainability: reduce duplication and improve safe diagnostics/cancellation
+(USR-4/6/7); agree initialization recovery before adding automatic retries (USR-23).
+Audit completion is not implementation completion, a release approval, or a clean build claim. All findings remain open for the owning team. The handover playbook (./_Usuarios_HANDOVER_PLAYBOOK.md) contains exact continuation prompts and validation instructions; the prompt history (./_Usuarios_PROMPT_HISTORY.md) records provenance.
