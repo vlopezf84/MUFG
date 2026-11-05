@@ -1,0 +1,3415 @@
+using AplicacionReplicas;
+using AplicacionReplicas.Interfaces;
+using AplicacionReplicas.Modelos;
+using AplicacionReplicas.Servicios;
+using BBVACommon;
+using BBVACommon.Interfaces;
+using InfraestructuraReplicas.Repositorios;
+using MUFG_T24.Comunes;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.ControladorServicios_Utilidades;
+using MUFG_T24.Core.Configuracion;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Infraestructura.Logging;
+using MUFG_T24.Inicializacion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using SimpleInjector;
+using SimpleInjector.Lifestyles;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using static AplicacionReplicas.Enums.ConstantesServicio.MsgLog;
+
+namespace REPLICAS_CDA
+{
+    /// <summary>
+    /// Clase principal del servicio Windows (presentación).
+    /// </summary>
+    public partial class ServiceHost : WindowsServiceHostBase
+    {
+        private Container _containerDI;
+        private Configuracion _configuracionBase;
+        private ILoggerService _logger;
+        protected override string NombreServicioLog => NombreServicio.Replicas.ToString();
+        protected override bool TimerEnabled => _configuracionBase?.TimerEnabled == true;
+        protected override double TimerIntervalMs => _configuracionBase?.TimerInterval ?? 300000;
+        protected override bool InicializacionCompleta => _containerDI != null && _configuracionBase != null;
+
+        protected override void LiberarRecursosTerminacion()
+        {
+            _containerDI?.Dispose();
+        }
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public ServiceHost()
+        {
+            this.ServiceName = NombreServicio.Replicas.ToString();
+        }
+
+        /// <summary>
+        /// Realiza la inyección y establece un timer
+        /// que ejecutará su delegado por tick del intervalo.
+        /// </summary>
+        protected override void Inicializacion(string[] args, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            //Realiza la configuracion del contenedor DI...
+            _containerDI = new SimpleInjector.Container();
+            _containerDI.Options.DefaultScopedLifestyle = new AsyncScopedLifestyle();
+            _containerDI.Register<IAlertas>(() => new Alertas(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null), Lifestyle.Singleton);
+            _containerDI.Register<IControlServicio, ControlServicio>();
+            _containerDI.Register<IParametrizacion, Parametrizacion>();
+
+            //Objeto que almacena la configuración necesaria para el funcionamiento del servicio...
+            _configuracionBase = new Configuracion();
+
+            //Inicializa la obtención de la configuración general y el logging...            
+            LecturaConfguracionGeneral.Inicializar();
+            ServicioConfiguracionSettings servicioMainConfiguracion = LecturaConfguracionGeneral.ObtenerServicio(NombreServicio.Replicas.ToString());
+            _configuracionBase.NombreServicio = servicioMainConfiguracion.NombreServicio;
+            _configuracionBase.PathLog = servicioMainConfiguracion.Log;
+            _configuracionBase.TimerEnabled = servicioMainConfiguracion.TimerEnable;
+            _configuracionBase.TimerInterval = servicioMainConfiguracion.Timer;
+            _configuracionBase.TamanoMaximoArchivoLogKB = servicioMainConfiguracion.TamanoMaximoArchivoLogKB.ToString();
+            _configuracionBase.ForzaEjecucionServicios = servicioMainConfiguracion.ForzaEjecucionServicios;
+
+            RutasConfiguracion rutas = new RutasConfiguracion()
+            {
+                MUFG_Servicios_Path_Log = _configuracionBase.PathLog
+            };
+            Logging.Init(rutas, servicioMainConfiguracion.NombreServicio, servicioMainConfiguracion.TamanoMaximoArchivoLogKB);            
+            Logging.Info(LEYENDO_ARCHIVO);
+
+
+            //Registra la configuracion...
+            _containerDI.Register<Configuracion>(() => _configuracionBase.Clone(), Lifestyle.Scoped);
+            _containerDI.Register<EstadoHorarioOperacion>(Lifestyle.Singleton);
+
+            //Registra ejecucion de proceso inicial, esta interface proviene de la libreria MUFG
+            //para la carga inicial de configuracion del servicio
+            _containerDI.Register<IEjecucionServicio, OperacionServicio>(Lifestyle.Scoped);
+            _containerDI.Register<IControladorServicios, MUFG_T24.ControladorServicios_Utilidades.ControladorServicios>();
+
+            //Registra configuraciones/parametros propias del servicio
+            _containerDI.Register<ParametrosConfiguracion>(Lifestyle.Singleton);
+            _containerDI.Register<IDAO_CMS, RepositorioCMS>();
+            _containerDI.Register<IDAO_SPEI, RepositorioSPEI>();
+            _containerDI.Register<IDAO_SPID, RepositorioSPID>();
+            _containerDI.Register<IDAO_TEF, RepositorioTEF>();
+            _containerDI.Register<IDAO_TOMI, RepositorioTOMI>();
+            _containerDI.Register<IDAO_TOMIHIST, RepositorioTOMIHIST>();
+            _containerDI.Register<IDAO_VT24, RepositorioVT24>();
+            _containerDI.Register<IProcesoServicio, ProcesoServicio>();
+            _containerDI.Register<ITsecClient, TsecClient>();
+
+            //injectamos la clase para el manejo de errores
+            _containerDI.Register<ControlErrorStore>(Lifestyle.Singleton);
+            _containerDI.Register<IEmailService, EmailService>(Lifestyle.Scoped);
+            _containerDI.Register<IControlErrorService, ControlErrorService>(Lifestyle.Scoped);
+
+            //para registro de log con interface
+            _containerDI.Register<ILoggerService, LoggerService>(Lifestyle.Singleton);
+            //para el registro de alertas centralziado
+            _containerDI.Register<IExtensionAlerta, ExtensionAlerta>(Lifestyle.Scoped);
+
+            _containerDI.Verify();
+
+            using (AsyncScopedLifestyle.BeginScope(_containerDI))
+            {
+                _logger = _containerDI.GetInstance<ILoggerService>();
+            }
+
+        }
+
+        /// <summary>
+        /// Realiza la obtención inicial de parámetros (una sola vez).
+        /// </summary>
+        protected override async Task ParametrizacionesAsync(CancellationToken ct)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                //Obtiene el proceso actual...
+                IParametrizacion _parametrizacion = _containerDI.GetInstance<IParametrizacion>();
+                _configuracionBase = await _parametrizacion.ObtenerProcesoActualAsync(_configuracionBase, ct);
+
+                if (!_configuracionBase.Pid.HasValue)
+                    throw new Exception(LogsParametrizacion.PID_NOCONFIGURADO);
+
+                if (string.IsNullOrWhiteSpace(_configuracionBase.NombreProceso))
+                    throw new Exception(LogsParametrizacion.NOMBRE_NOCONFIGURADO);
+
+                if (string.IsNullOrWhiteSpace(_configuracionBase.NombreDisplay))
+                    throw new Exception(LogsParametrizacion.DISPLAY_NOCONFIGURADO);
+
+                //Marca el servicio en uso...
+                IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+                await _controlServicio.MarcarPuertoEnUsoAsync(_configuracionBase.Pid.GetValueOrDefault(), _configuracionBase.NombreProceso, _configuracionBase.NombreDisplay, _configuracionBase.NombreServicio, ct);
+
+            }
+            catch (Exception ex)
+            {
+                Logging.Error($"{LogsParametrizacion.EXCEPTION}{ex}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Ejecuta el funcionamiento principal del servicio en cada tick.
+        /// </summary>
+        /// <param name="ct">Token para cancelar la ejecución del ciclo.</param>
+        /// <returns>Una tarea que representa la ejecución asincrónica del ciclo.</returns>
+        protected override async Task OnTimerAsync(CancellationToken ct)
+        {
+            using (AsyncScopedLifestyle.BeginScope(_containerDI))
+            {
+                try
+                {
+                    _logger.Info(SEPARADOR);
+                    _logger.Info(LogsTimer.TIMER_INICIO);
+
+                    //Ejecuta el procedimiento principal del servicio...
+                    var repTomi = _containerDI.GetInstance<IDAO_TOMI>();
+                    var repCms = _containerDI.GetInstance<IDAO_CMS>();
+                    var repvT24 = _containerDI.GetInstance<IDAO_VT24>();
+                    var resultAccesDbTomi = await repTomi.ValidaAccesoBdAsync(ct);
+                    var resultAccesDbCms = await repCms.ValidaAccesoBdAsync(ct);
+                    var resultAccesDbVt24 = await repvT24.ValidaAccesoBdAsync(ct);
+                    if (resultAccesDbTomi && resultAccesDbCms && resultAccesDbVt24)
+                    {
+                        var operacionServicio = _containerDI.GetInstance<IEjecucionServicio>();
+                        var result=await operacionServicio.EjecutarServicioAsync(ct).ConfigureAwait(false);
+                        if (!result)
+                            throw new ApplicationException(LogsTimer.TIMER_ERROR_PROCESO_INTERNO);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error($"{LogsTimer.TIMER_EXCEPTION} {ex}");
+                }
+                finally
+                {
+                    _logger.Info(LogsTimer.TIMER_FIN);
+                    _logger.Info(SEPARADOR);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Realiza ciertas operaciones antes de finalizar el servicio.
+        /// </summary>
+        protected override async Task TerminacionAsync(CancellationToken waitCt, CancellationToken cleanupCt, Task startupTask, Task runningTask)
+        {            
+            _logger.Info(LogsTerminacion.INFO_ONSTOP_FINALIZANDO_INICIO);
+            try
+            {
+                using (AsyncScopedLifestyle.BeginScope(_containerDI))
+                {
+                    IControlServicio _controlServicio = _containerDI.GetInstance<IControlServicio>();
+
+                    await _controlServicio.EsperarTareaActivaAsync(startupTask, ConstantesSistema.ParametrizacionInicial, waitCt).ConfigureAwait(false);
+                    await _controlServicio.EsperarTareaActivaAsync(runningTask, ConstantesSistema.ProcesamientoActivo, waitCt).ConfigureAwait(false);
+
+                    //Marca el servicio en uso...
+                    await _controlServicio.MarcarPuertoEnUsoAsync(null, null, null, _configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);
+                                            
+                    //Marca el termino del servicio...
+                    await _controlServicio.ActualizaTerminacion(_configuracionBase.NombreServicio, cleanupCt).ConfigureAwait(false);                                            
+                    _logger.Info(LogsTerminacion.TERMINACION_EXITOSA_BD);
+                }
+            }
+            catch(ApplicationException exp)
+            {
+                _logger.Error(exp.Message);
+            }
+            catch (Exception ex)
+            {                
+                _logger.Error($"{LogsTerminacion.ERROR_TERMINACION}{ex}");
+            }
+            finally
+            {
+                _logger.Info(LogsTerminacion.INFO_ONSTOP_FINALIZANDO_FIN);
+            }
+        }
+
+    }
+}
+
+using AplicacionReplicas.Comunes;
+using AplicacionReplicas.DTOs;
+using AplicacionReplicas.Interfaces;
+using AplicacionReplicas.Modelos;
+using MUFG_T24.Comunes;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data.SqlClient;
+using System.Threading;
+using System.Threading.Tasks;
+using static AplicacionReplicas.Enums.ConstantesServicio;
+
+namespace InfraestructuraReplicas.Repositorios
+{
+    /// <summary>
+    /// Metodos para accesar/ejecutar sp´s en bd SPID
+    /// </summary>
+    public class RepositorioSPID : RepositorioMaestro, IDAO_SPID
+    {
+        private readonly ILoggerService _log;
+        #region Constructor
+        /// <summary>
+        /// Constructor servicio
+        /// </summary>
+        /// <param name="configuracion"></param>
+        public RepositorioSPID(ILoggerService log) : base(BasedatosProveedor.SqlServer, NombreBasedatos.SPID, null, null)
+        {
+            _log = log;
+        }
+        #endregion
+
+        /// <summary>
+        /// Método que permite obtener lista de participantes
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <returns>Lista de participantes</returns>
+        public async Task<List<ParticipanteSpeiSpidDTO>> ObtenerParticipantesAsync(string storedProcedure, CancellationToken ct)
+        {
+            StoredProcedureResult<ParticipanteSpeiSpidDTO> resultado =
+                await EjecutarStoredProcedureQuery<ParticipanteSpeiSpidDTO>(
+                storedProcedure, cmd =>
+                {
+                    cmd.CommandTimeout = 60;
+                },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+        }
+
+        /// <summary>
+        /// Método que permite obtener registros de salida
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns>Lista de registros</returns>
+        public async Task<List<SalidasSpid>> ObtenerSalidaAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros)
+        {
+            StoredProcedureResult<SalidasSpid> resultado =
+                await EjecutarStoredProcedureQuery<SalidasSpid>(
+                storedProcedure, cmd =>
+                {
+                    cmd.CommandTimeout = 60;
+                    cmd.AddParameters(parametros);
+                }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+        }
+    }
+}
+
+
+using AplicacionReplicas.Comunes;
+using AplicacionReplicas.DTOs.VT24;
+using AplicacionReplicas.Enums;
+using AplicacionReplicas.Interfaces;
+using AplicacionReplicas.Modelos;
+using AplicacionReplicas.Utilidades;
+using MUFG_T24.Comunes;
+using MUFG_T24.Conexiones;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using static AplicacionReplicas.Enums.ConstantesServicio;
+
+namespace InfraestructuraReplicas.Repositorios
+{
+    /// <summary>
+    /// Metodos para accesar/ejecutar sp´s en bd VT24
+    /// </summary>
+    public class RepositorioVT24 : RepositorioMaestro, IDAO_VT24
+    {
+
+        private readonly Configuracion _configuracion;
+        private readonly IControlErrorService _controlErrorService;
+        private readonly IExtensionAlerta _extAlerta;
+        private readonly ILoggerService _log;
+
+        #region Constructor
+        /// <summary>
+        /// Constructor servicio
+        /// </summary>
+        /// <param name="configuracion"></param>
+        public RepositorioVT24(
+            Configuracion configuracion
+            , IControlErrorService controlErrorService
+            , IExtensionAlerta extAlerta
+            , ILoggerService log
+            ) : base(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW, null, null)
+        {
+            _configuracion = configuracion;
+            _controlErrorService = controlErrorService;
+            _extAlerta = extAlerta;
+            _log = log;
+        }
+        #endregion
+
+        /// <summary>
+        /// Metodo para validar conexión con base de datos
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ValidaAccesoBdAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info("RepositorioVT24|ValidaAccesoBd|Inicio");
+
+                var cnn = ConexionBasedatosFactory.CrearConexion(BasedatosProveedor.SqlServer, NombreBasedatos.T24_VW);
+                using (var cn = cnn.CrearConexion())
+                {
+                    await cn.OpenAsync(ct);
+                    _log.Info($"Base de datos {NombreBasedatos.T24_VW} iniciada correctamente");
+                    if (cn.State == ConnectionState.Open)
+                    {
+                        // Base ok
+                        _controlErrorService.LimpiaControlError(3);
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RepositorioVT24|ValidaAccesoBd|Se presenta exception general ex:{ex}");
+                await _controlErrorService.ControlErrorAsync(3, ex);
+                //Registra alerta
+                await _extAlerta.RegistraCriticoAsync("Error en la apertura de la base VT24", ex,ct);
+            }
+            finally
+            {
+                _log.Info("RepositorioVT24|ValidaAccesoBd|Fin");
+            }
+            return false;
+        }
+
+
+
+
+
+        /// <summary>
+        /// Mpetodo general para obtener datos de la bd
+        /// </summary>
+        /// <param name="storedProcedure"></param>
+        /// <param name="parametros"></param>
+        /// <returns></returns>
+        public async Task<DatosXML> ObtenerDatosAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            // Creamos salida de datos XML
+            SqlParameter salidaXML = null;
+
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                // Agrega los parametros de salida
+                cmd.Parameters.Clear();
+                salidaXML = cmd.AddOutPutMaxString(ConstantesServicio.General.PARAMETRO_TABLA_XML);
+                cmd.AddParameters(parametros);
+                cmd.CommandTimeout = 60;
+
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            string data = salidaXML.GetValueOrDefault<string>();
+            DatosXML dataXml = Utilidades.IsValidXML(data);
+            if (!dataXml.Exito || !string.IsNullOrEmpty(dataXml.MsgGeneral))
+            {
+                _log.Info("No se recibió contenido XML en la salida del procedimiento.");
+            }
+
+            return dataXml;
+        }
+
+        public async Task<string> ObtenerDatoAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            // Creamos salida de datos XML
+            SqlParameter fechaProceso = null;
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {             
+                fechaProceso = cmd.AddOutPutString("@ProcessDate", 8);
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return fechaProceso.GetValueOrDefault<string>();
+        }
+
+        /// <summary>
+        /// Obtener datos de conciliacion 
+        /// </summary>
+        /// <returns></returns>
+
+        public async Task<List<ConciliacionT24Dto>> ObtenerDataVwT24Account(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            StoredProcedureResult<ConciliacionT24Dto> resultado =
+                await EjecutarStoredProcedureQuery<ConciliacionT24Dto>(
+                storedProcedure, cmd =>
+                {
+                    cmd.CommandTimeout = 60;
+                    cmd.AddParameters(parametros);
+                }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+        }
+
+        /// <summary>
+        /// Obtiene Fecha Juliana
+        /// </summary>
+        /// <param name="storedProcedure"></param>
+        /// <param name="parametros"></param>
+        /// <returns></returns>
+        public async Task<DatosFechaJuliana> ObtenerFechaJuliana(string storedProcedure, CancellationToken ct)
+        {
+            StoredProcedureResult<DatosFechaJuliana> resultado =
+                await EjecutarStoredProcedureQuery<DatosFechaJuliana>(
+                storedProcedure, cmd =>
+                {
+                    cmd.CommandTimeout = 60;
+                },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data?.FirstOrDefault();
+        }
+    }
+}
+
+
+using AplicacionReplicas.Comunes;
+using AplicacionReplicas.DTOs;
+using AplicacionReplicas.Enums;
+using AplicacionReplicas.Interfaces;
+using AplicacionReplicas.Modelos;
+using AplicacionReplicas.Utilidades;
+using MUFG_T24.Comunes;
+using MUFG_T24.Conexiones;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using static AplicacionReplicas.Enums.ConstantesServicio;
+using static AplicacionReplicas.Enums.ConstantesServicio.Sp;
+
+namespace InfraestructuraReplicas.Repositorios
+{
+    /// <summary>
+    /// Metodos para accesar/ejecutar sp´s en bd CMs
+    /// </summary>
+    public class RepositorioCMS : RepositorioMaestro, IDAO_CMS
+    {
+        private readonly Configuracion _configuracion;
+        private readonly IControlErrorService _controlErrorService;
+        private readonly IExtensionAlerta _extAlerta;
+        private readonly ILoggerService _log;
+
+
+        #region Constructor
+        /// <summary>
+        /// Constructor servicio
+        /// </summary>
+        /// <param name="configuracion"></param>
+        public RepositorioCMS(
+            Configuracion configuracion
+            , IControlErrorService controlErrorService
+            , IExtensionAlerta extAlerta
+            , ILoggerService log
+            ) : base(BasedatosProveedor.SqlServer, NombreBasedatos.CMS, null, null)
+        {
+            _configuracion = configuracion;
+            _controlErrorService = controlErrorService;
+            _extAlerta = extAlerta;
+            _log = log;
+        }
+        #endregion
+
+        /// <summary>
+        /// Metodo para validar el acceso a la bdCMS
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ValidaAccesoBdAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info("RepositorioCMS|ValidaAccesoBd|Inicio");
+
+                var cnn = ConexionBasedatosFactory.CrearConexion(BasedatosProveedor.SqlServer, NombreBasedatos.CMS);
+                using (var cn = cnn.CrearConexion())
+                {
+                    await cn.OpenAsync(ct);
+                    _log.Info($"RepositorioCMS|ValidaAccesoBd|Base de datos {NombreBasedatos.CMS} iniciada correctamente");
+                    if (cn.State == ConnectionState.Open)
+                    {
+                        // Base ok
+                        _controlErrorService.LimpiaControlError(2);
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RepositorioCMS|ValidaAccesoBd|Se presenta exception general ex:{ex}");
+                await _controlErrorService.ControlErrorAsync(2, ex);
+                //Registra alerta                
+                await _extAlerta.RegistraCriticoAsync("Error en la apertura de la base CMS", ex,ct);               
+            }
+            finally
+            {
+                _log.Info("RepositorioCMS|ValidaAccesoBd|Fin");
+            }
+            return false;
+        }
+
+
+
+        /// <summary>
+        /// Método general que uctualiza información 
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del sp</param>
+        /// <param name="parametros">parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns>Total de registros actualizados</returns>
+        public async Task<ResultadoSp> ActualizarAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            // Creamos parámetros de salida.
+            SqlParameter paramActualizados = null;
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {                                
+                paramActualizados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ACTUALIZADOS);
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+
+            int actualizados = paramActualizados.GetValueOrDefault<int>();
+
+            return new ResultadoSp(0, 0, actualizados, resultado.Exito);
+        }
+
+
+        /// <summary>
+        /// Método por el cual se actualizan registros ademas de agregar nuevos registros
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del sp</param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns>total de registros agregados y actualizados</returns>
+        public async Task<ResultadoSp> ActualizarAgregarAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            SqlParameter paramAgregados = null;
+            SqlParameter paramActualizados = null;
+
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                cmd.CommandTimeout = 60;
+                paramActualizados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ACTUALIZADOS);
+                paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+                cmd.AddParameters(parametros);
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            int actualizados = paramActualizados.GetValueOrDefault<int>();
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+
+            return new ResultadoSp(0, agregados, actualizados, resultado.Exito);
+        }
+
+        /// <summary>
+        /// Método que permite agregar nuevos registros
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns>Total de Registros agregados</returns>
+        public async Task<ResultadoSp> AgregarAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            SqlParameter paramAgregados = null;
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                cmd.CommandTimeout = 60;
+                paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+                cmd.AddParameters(parametros);
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+            
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+
+            return new ResultadoSp(0, agregados, 0, resultado.Exito);
+        }
+
+        /// <summary>
+        /// Método a través del cual se eliminan y agregan registros
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns>Numero de Registros agregados y eliminados</returns>
+        public async Task<ResultadoSp> EliminarAgregarAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            SqlParameter paramEliminados = null;
+            SqlParameter paramAgregados = null;
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                cmd.CommandTimeout = 60;
+                paramEliminados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ELIMINADOS);
+                paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+                cmd.AddParameters(parametros);
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+
+            int eliminados = paramEliminados.GetValueOrDefault<int>();
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+
+            return new ResultadoSp(eliminados, agregados, 0, resultado.Exito);
+        }
+
+        /// <summary>
+        /// Metodo que permite obtener cadena en forma xml
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del sp</param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns>Cadena en forma xml</returns>
+        public async Task<DatosXML> ObtenerDatosAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            SqlParameter salidaXML = null;
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                salidaXML=cmd.AddOutPutMaxString(ConstantesServicio.General.PARAMETRO_TABLA_XML);
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            string data = salidaXML.GetValueOrDefault<string>();
+
+            DatosXML dataXml = new DatosXML();
+            dataXml = Utilidades.IsValidXML(data);
+            if (!dataXml.Exito)
+            {
+                _log.Error($"Error en conversion Xml. data: {dataXml.MsgGeneral}");
+            }
+            return dataXml;
+        }
+
+        /// <summary>
+        /// Método para ejecutar procedimiento almacenado que devuelve una lista de elementos
+        /// En este caso obtiene valores de parametros
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns>Lista de parametros con sus valores</returns>
+        public async Task<List<ParametroCmsDTO>> LeerParametroAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros)
+        {
+            StoredProcedureResult<ParametroCmsDTO> resultado =
+                await EjecutarStoredProcedureQuery<ParametroCmsDTO>(
+                storedProcedure, cmd =>
+                {
+                    cmd.CommandTimeout = 60;
+                    cmd.AddParameters(parametros);
+                },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+        }
+
+        /// <summary>
+        /// Método para actualizar valores de parametros
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <param name="parametros">>Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns></returns>
+        public async Task<bool> ActualizarParametroAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros)
+        {            
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Exito;
+        }
+
+        /// <summary>
+        /// Metodo para actualizar permisos
+        /// </summary>
+        /// <param name="storedProcedure"></param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> ActualizaPermisosAsync(string storedProcedure, CancellationToken ct)
+        {
+            SqlParameter paramActualizados = null;
+            SqlParameter paramAgregados = null;
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                paramActualizados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ACTUALIZADOS);
+                paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+            }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            int actualizados = paramActualizados.GetValueOrDefault<int>();
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+
+            return new ResultadoSp(0, agregados, actualizados, resultado.Exito);
+        }
+
+        ///// <summary>
+        ///// Metodo para insertar clientes validados
+        ///// </summary>
+        ///// <param name="storedprocedure"></param>
+        ///// <returns></returns>
+        //public async Task<ResultadoSp> InsertaClientesValidadosAsync(string storedprocedure)
+        //{            
+        //    SqlParameter paramAgregados = null;
+        //    var resultado = await EjecutarStoredProceduredNonQuery(storedprocedure, cmd =>
+        //    {
+        //       paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+        //    },);
+
+        //    if (!string.IsNullOrEmpty(resultado.MensajeError))
+        //    {
+        //        _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+        //        throw new Exception(resultado.MensajeError);
+        //    }
+            
+        //    int agregados = paramAgregados.GetValueOrDefault<int>();
+        //    return new ResultadoSp(0, agregados, 0, resultado.Exito);
+        //}
+
+
+        /// <summary>
+        /// Metodo para eliminar y agregar operaciones SPID
+        /// </summary>
+        /// <param name="salidaSpid"></param>
+        /// <param name="ctasCliente"></param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> EliminaAgregaOperacionesSpid(List<SalidasSpid> salidaSpid, List<CuentasCliente> ctasCliente, CancellationToken ct)
+        {
+            if (salidaSpid.Count == 0)
+            {
+                return new ResultadoSp(0, 0, 0, false);
+            }
+            var itemsAdd = new List<OperacionCepSpid>();
+            foreach (var ope in salidaSpid)
+            {
+                var cep = new OperacionCepSpid
+                {
+                    Tipo = "S",
+                    Folio = ope.op_clave,
+                    Fecha = ope.op_fecha_oper,
+                    Cuenta = ope.cuenta,
+                    monto = ope.op_monto,
+                    BancoOrdenante = "40108",
+                    BancoBeneficairio = ope.ins_clave,
+                    Beneficiario = ope.op_nom_ben,
+                    Ordenante = ope.op_nom_ord,
+                    ClaveRastreo = ope.op_cve_rastreo,
+                    Clabe = ope.op_cuenta_ben,
+                    ReferenciaMufg = ope.op_ref_numerica,
+                    Cliente = ctasCliente.FirstOrDefault(c => c.Cuenta == ope.cuenta)?.Cliente
+                };
+                itemsAdd.Add(cep);
+            }
+           
+            //registrar en el log las cuentas que no tiene cliente
+            var OpeSinCliente = itemsAdd.Where(c => c.Cliente == null);
+            if (OpeSinCliente.Count()>0)
+                _log.Error($"EliminaAgregaOperacionesSpid|Las siguientes Folios no tienen asignado un cliente:[{string.Join(",", OpeSinCliente.Select(f=>f.Folio)) }]");
+
+            //seleccionar las operaciones que si tiene cliente para mandarlas a procesar
+            var itemsSend = itemsAdd.Where(c => c.Cliente != null);
+            SqlParameter paramEliminados = null;
+            SqlParameter paramAgregados = null;
+            DataTable dt = Utilidades.ToDataTable(itemsSend.ToList());
+            var resultado = await EjecutarStoredProceduredNonQuery(Cms.uspActualizaCepOperacionesSpidCMS, cmd =>
+            {
+                cmd.AddBoolParam("@boolDelete", true);
+                cmd.AddTableTypeParam("@OperacionCepBotType", "dbo.OperacionCepBotType", dt);
+                paramEliminados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ELIMINADOS);
+                paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+            int eliminados = paramEliminados.GetValueOrDefault<int>();
+            return new ResultadoSp(eliminados, agregados, 0, resultado.Exito);
+        }
+
+        /// <summary>
+        /// Método para agregar operaciones de entrada SPID
+        /// </summary>
+        /// <param name="entradasSpid"></param>
+        /// <param name="ctasCliente"></param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> AgregaOperacionesEntradaSpid(List<SalidasSpid> entradasSpid, List<CuentasCliente> ctasCliente, CancellationToken ct)
+        {
+
+            if (entradasSpid.Count == 0)
+            {
+                return new ResultadoSp(0, 0, 0, false);
+            }
+
+            var itemsAdd = new List<OperacionCepSpid>();
+            foreach (var ope in entradasSpid)
+            {
+                var cep = new OperacionCepSpid
+                {
+                    Tipo = "E",
+                    Folio = ope.op_clave,
+                    Fecha = ope.op_fecha_oper,
+                    Cuenta = ope.cuenta,
+                    monto = ope.op_monto,
+                    BancoOrdenante = ope.ins_clave,
+                    BancoBeneficairio = "40108",
+                    Beneficiario = ope.op_nom_ben,
+                    Ordenante = ope.op_nom_ord,
+                    ClaveRastreo = ope.op_cve_rastreo,
+                    Clabe = ope.op_cuenta_ben,
+                    ReferenciaMufg = ope.op_ref_numerica,
+                    Cliente = ctasCliente.FirstOrDefault(c => c.Cuenta == ope.cuenta)?.Cliente
+                };
+                itemsAdd.Add(cep);
+            }
+
+            //registrar en el log las cuentas que no tiene cliente
+            var OpeSinCliente = itemsAdd.Where(c => c.Cliente == null);
+            if (OpeSinCliente.Count() > 0)
+                _log.Error($" AgregaOperacionesEntradaSpid|Las siguientes Folios no tienen asignado un cliente:[{string.Join(",", OpeSinCliente.Select(f => f.Folio))}]");
+
+            //seleccionar las operaciones que si tiene cliente para mandarlas a procesar
+            var itemsSend = itemsAdd.Where(c => c.Cliente != null);
+
+            DataTable dt = Utilidades.ToDataTable(itemsSend.ToList());
+            SqlParameter paramEliminados = null;
+            SqlParameter paramAgregados = null;
+            var resultado = await EjecutarStoredProceduredNonQuery(Cms.uspActualizaCepOperacionesSpidCMS, cmd =>
+            {
+                cmd.AddTableTypeParam("@OperacionCepBotType", "dbo.OperacionCepBotType", dt);
+                paramEliminados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ELIMINADOS);
+                paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+            int eliminados = paramEliminados.GetValueOrDefault<int>();
+            return new ResultadoSp(eliminados, agregados, 0, resultado.Exito);
+        }
+
+        /// <summary>
+        /// Método para eliminar operaciones SPEI
+        /// </summary>
+        /// <param name="salidaSpei"></param>
+        /// <param name="ctasCliente"></param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> EliminaAgregaOperacionesSpei(List<SalidasSpid> salidaSpei, List<CuentasCliente> ctasCliente, CancellationToken ct)
+        {
+
+            if (salidaSpei.Count == 0)
+            {
+                return new ResultadoSp(0, 0, 0, false);
+            }
+
+            var itemsAdd = new List<OperacionCepSpid>();
+            foreach (var ope in salidaSpei)
+            {
+
+                var cep = new OperacionCepSpid
+                {
+                    Tipo = "S",
+                    Folio = ope.op_clave,
+                    Fecha = ope.op_fecha_oper,
+                    Cuenta = ope.cuenta,
+                    monto = ope.op_monto,
+                    BancoOrdenante = "40108",
+                    BancoBeneficairio = ope.ins_clave,
+                    Beneficiario = ope.op_nom_ben,
+                    Ordenante = ope.op_nom_ord,
+                    ClaveRastreo = ope.op_cve_rastreo,
+                    Clabe = ope.op_cuenta_ben,
+                    ReferenciaMufg = ope.op_ref_numerica,
+                    Cliente = ctasCliente.FirstOrDefault(c => c.Cuenta == ope.cuenta)?.Cliente
+                };
+                itemsAdd.Add(cep);
+            }
+
+            //registrar en el log las cuentas que no tiene cliente
+            var OpeSinCliente = itemsAdd.Where(c => c.Cliente == null);
+            if (OpeSinCliente.Count() > 0)
+                _log.Error($"EliminaAgregaOperacionesSpei|Las siguientes Folios no tienen asignado un cliente:[{string.Join(",", OpeSinCliente.Select(f => f.Folio))}]");
+
+            //seleccionar las operaciones que si tiene cliente para mandarlas a procesar
+            var itemsSend = itemsAdd.Where(c => c.Cliente != null);
+
+            DataTable dt = Utilidades.ToDataTable(itemsSend.ToList());
+            SqlParameter paramEliminados = null;
+            SqlParameter paramAgregados = null;
+            var paramDelete = basedatosConexion.CrearParametro("@boolDelete", 1);
+            var resultado = await EjecutarStoredProceduredNonQuery(Cms.uspActualizaCepOperacionesSpeiCMS, cmd =>
+            {
+                cmd.AddBoolParam("@boolDelete", true);
+                cmd.AddTableTypeParam("@OperacionCepBotType", "dbo.OperacionCepBotType", dt);
+                paramEliminados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ELIMINADOS);
+                paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+            }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+            int eliminados = paramEliminados.GetValueOrDefault<int>();
+            return new ResultadoSp(eliminados, agregados, 0, resultado.Exito);
+        }
+
+
+        /// <summary>
+        /// Método para agregar oepraciones de entrada SPEI
+        /// </summary>
+        /// <param name="entradasSpei"></param>
+        /// <param name="ctasCliente"></param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> AgregaOperacionesEntradaSpei(List<SalidasSpid> entradasSpei, List<CuentasCliente> ctasCliente, CancellationToken ct)
+        {
+
+            if (entradasSpei.Count == 0)
+            {
+                return new ResultadoSp(0, 0, 0, false);
+            }
+
+            var itemsAdd = new List<OperacionCepSpid>();
+            foreach (var ope in entradasSpei)
+            {
+
+                var cep = new OperacionCepSpid
+                {
+                    Tipo = "E",
+                    Folio = ope.op_clave,
+                    Fecha = ope.op_fecha_oper,
+                    Cuenta = ope.cuenta,
+                    monto = ope.op_monto,
+                    BancoOrdenante = ope.ins_clave,
+                    BancoBeneficairio = "40108",
+                    Beneficiario = ope.op_nom_ben,
+                    Ordenante = ope.op_nom_ord,
+                    ClaveRastreo = ope.op_cve_rastreo,
+                    Clabe = ope.op_cuenta_ben,
+                    ReferenciaMufg = ope.op_ref_numerica,
+                    Cliente = ctasCliente.FirstOrDefault(c => c.Cuenta == ope.cuenta)?.Cliente
+                };
+                itemsAdd.Add(cep);
+            }
+
+            if (itemsAdd.Count == 0)
+            {
+                return new ResultadoSp(0, 0, 0, false);
+            }
+            else
+            {
+                //registrar en el log las cuentas que no tiene cliente
+                var OpeSinCliente = itemsAdd.Where(c => c.Cliente == null);
+                if (OpeSinCliente.Count() > 0)
+                    _log.Error($"AgregaOperacionesEntradaSpei|Las siguientes Folios no tienen asignado un cliente:[{string.Join(",", OpeSinCliente.Select(f => f.Folio))}]");
+
+                //seleccionar las operaciones que si tiene cliente para mandarlas a procesar
+                var itemsSend = itemsAdd.Where(c => c.Cliente != null);
+
+
+                SqlParameter paramEliminados = null;
+                SqlParameter paramAgregados = null;
+                DataTable dt = Utilidades.ToDataTable(itemsSend.ToList());
+                var resultado = await EjecutarStoredProceduredNonQuery(Cms.uspActualizaCepOperacionesSpeiCMS, cmd =>
+                {
+                    cmd.AddBoolParam("@boolDelete", false);
+                    cmd.AddTableTypeParam("@OperacionCepBotType", "dbo.OperacionCepBotType",dt);
+                    paramEliminados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ELIMINADOS);
+                    paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+                }, ct);
+
+                if (!string.IsNullOrEmpty(resultado.MensajeError))
+                {
+                    _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                    throw new Exception(resultado.MensajeError);
+                }
+
+                int agregados = paramAgregados.GetValueOrDefault<int>();
+                int eliminados = paramEliminados.GetValueOrDefault<int>();
+                return new ResultadoSp(eliminados, agregados, 0, resultado.Exito);
+            }
+        }
+
+
+        /// <summary>
+        /// Método para obtener operaciones Canceladas
+        /// </summary>
+        /// <param name="storedprocedure"></param>
+        /// <param name="parametros"></param>
+        /// <returns></returns>
+        public async Task<string> ObtenerOperacionesCanceladas(string storedprocedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+
+            SqlParameter salidaXML = null;
+            var resultado = await EjecutarStoredProceduredNonQuery(storedprocedure, cmd =>
+            {
+                cmd.Parameters.Clear();
+                salidaXML = cmd.AddOutPutMaxString(ConstantesServicio.General.PARAMETRO_TABLA_XML);
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            string data = salidaXML.GetValueOrDefault<string>();
+            return data;
+        }
+    }
+}
+
+using AplicacionReplicas.Comunes;
+using AplicacionReplicas.DTOs;
+using AplicacionReplicas.DTOs.VT24;
+using AplicacionReplicas.Enums;
+using AplicacionReplicas.Interfaces;
+using AplicacionReplicas.Modelos;
+using AplicacionReplicas.Utilidades;
+using MUFG_T24.Comunes;
+using MUFG_T24.Conexiones;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Enums_utilidades;
+using MUFG_T24.Modelos;
+using MUFG_T24.Repositorios;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using static AplicacionReplicas.Enums.ConstantesServicio;
+
+namespace InfraestructuraReplicas.Repositorios
+{
+    /// <summary>
+    /// Metodos para accesar/ejecutar sp´s en bd TOMI
+    /// </summary>
+    public class RepositorioTOMI : RepositorioMaestro, IDAO_TOMI
+    {
+        private readonly Configuracion _configuracion;
+        private readonly IControlErrorService _controlErrorService;
+        private readonly IExtensionAlerta _extAlerta;
+        private readonly ILoggerService _log;
+
+        #region Constructor
+        /// <summary>
+        /// Constructor servicio
+        /// </summary>
+        /// <param name="configuracion"></param>
+        public RepositorioTOMI(
+            Configuracion configuracion
+            , IControlErrorService controlErrorService
+            , IExtensionAlerta extAlerta
+            , ILoggerService log
+            ) : base(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI, null, null)
+        {
+            _configuracion = configuracion;
+            _controlErrorService = controlErrorService;
+            _extAlerta = extAlerta;
+            _log = log;
+
+        }
+        #endregion
+
+
+        /// <summary>
+        /// Metodo para validar conexión con base de datos
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ValidaAccesoBdAsync(CancellationToken ct)
+        {
+            try
+            {                
+                _log.Info(MsgLog.Bd.Tomi.ValidaAccesoInicio);
+                var cnn = ConexionBasedatosFactory.CrearConexion(BasedatosProveedor.SqlServer, NombreBasedatos.TOMI);
+
+                using (var cn = cnn.CrearConexion())
+                {
+                    await cn.OpenAsync(ct);                    
+                    _log.Info(MsgLog.Bd.Tomi.ConexionOk);
+                    if (cn.State == ConnectionState.Open)
+                    {
+                        // Base ok
+                        _controlErrorService.LimpiaControlError(1);
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"{MsgLog.Bd.Tomi.Exception} : {ex.Message}");                
+                await _controlErrorService.ControlErrorAsync(1, ex);
+                //Registra alerta
+                await _extAlerta.RegistraCriticoAsync(MsgLog.Bd.Tomi.msgAcceso, ex,ct);                
+            }
+            finally
+            {
+                _log.Info(MsgLog.Bd.Tomi.ValidaAccesoFin);
+            }
+            return false;
+        }
+
+        public async Task<bool> EsDiaHabilAsync(CancellationToken ct)
+        {
+
+            var resultadoSp = await EjecutarStoredProcedureQuery<CampoGeneral>(
+                EnumNombreSp.SP_ES_DIA_HABIL,
+                cmd => cmd.Parameters.Add(
+                    basedatosConexion.CrearParametro("@fecha", DateTime.Now.Date.ToString(EnumParametrosGenerales.FECHA_HORA0_BD)
+                    )
+                ),
+                ct
+            );
+
+            if (!resultadoSp.Exito || !string.IsNullOrEmpty(resultadoSp.MensajeError))
+            {
+                _log.Error($"{MsgLog.Bd.Tomi.ProcesoEsDiaHabil}{MsgLog.Bd.ErrorEjecucionGral}{resultadoSp.MensajeError}");
+                throw new Exception(resultadoSp.MensajeError);
+            }
+
+            if (resultadoSp.Data.FirstOrDefault()?.Num_regs > 0)
+                return false;
+
+            return true;
+        }
+
+
+        /// <summary>
+        /// Obtiene las cuentas de los clientes
+        /// </summary>
+        /// <returns></returns>
+        public async Task<List<CuentasCliente>> ObtenerCuentasClienteAsync(CancellationToken ct)
+        {
+            var resultado = await EjecutarStoredProcedureQuery<CuentasCliente>(Sp.Tomi.uspObtenerCuentasClienteTOMI,null,ct );
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"Error en bd:|{resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+        }
+
+
+
+        /// <summary>
+        /// Método que permite la actualización de registros en bd
+        /// </summary>
+        /// <param name="storedProcedure"></param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> ActualizarAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+
+            // Creamos parámetros de salida.            
+            SqlParameter paramActualizados = null;
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                paramActualizados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ACTUALIZADOS);
+                cmd.AddParameters(parametros);
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+            int actualizados = paramActualizados.GetValueOrDefault<int>();            
+            return new ResultadoSp(0, 0, actualizados, resultado.Exito);
+        }
+
+        /// <summary>
+        /// Método que permite la autorización y cancelación de registros en bd
+        /// </summary>
+        /// <param name="storedProcedure"></param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns></returns>
+        public async Task<ResultadoSpAutorizaCancela> AutorizarCancelarAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+
+            SqlParameter paramAutorizados = null;
+            SqlParameter paramCancelados = null;
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                // Agrega los parametros de salida
+                cmd.Parameters.Clear();
+                paramAutorizados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AUTORIZADOS);
+                paramCancelados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_CANCELADOS);
+
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            int autorizados = paramAutorizados.GetValueOrDefault<int>();
+            int cancelados = paramCancelados.GetValueOrDefault<int>();
+
+            return new ResultadoSpAutorizaCancela(autorizados, cancelados, resultado.Exito);
+        }
+
+
+        /// <summary>
+        /// Método que permite eliminar registros en bd
+        /// </summary>
+        /// <param name="storedProcedure"></param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> EliminarAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+
+            SqlParameter paramEliminados = null;
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                // Agrega los parametros de salida
+                paramEliminados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ELIMINADOS);
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+            
+            int eliminados = paramEliminados.GetValueOrDefault<int>();
+
+            return new ResultadoSp(eliminados, 0, 0, resultado.Exito);
+        }
+
+        /// <summary>
+        /// Método que permite eliminar y agregar registros en bd
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> EliminarAgregarAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            SqlParameter paramEliminados = null;
+            SqlParameter paramAgregados = null;
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                // Agrega los parametros de salida
+                paramEliminados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ELIMINADOS);
+                paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            int eliminados = paramEliminados.GetValueOrDefault<int>();
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+
+            return new ResultadoSp(eliminados, agregados, 0, resultado.Exito);
+        }
+
+        /// <summary>
+        /// Método para obtener las claves de datos xml
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns></returns>
+        public async Task<ClavesDatosXML> ObtenerClavesDatosAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+
+            SqlParameter clavesSalidaXML = null;
+            SqlParameter salidaXML = null;
+
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                // Agrega los parametros de salida
+                salidaXML = cmd.AddOutPutMaxString(ConstantesServicio.General.PARAMETRO_TABLA_XML);
+                clavesSalidaXML = cmd.AddOutPutMaxString(ConstantesServicio.General.PARAMETRO_TABLA_AUTORIZA_XML);
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return new ClavesDatosXML(clavesSalidaXML.Value?.ToString(), salidaXML.Value?.ToString());
+        }
+
+        /// <summary>
+        /// Metodo para obtener datos en formato XML
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns></returns>
+        public async Task<DatosXML> ObtenerDatosAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            // Creamos salida de datos XML
+            SqlParameter salidaXML = null;
+            // Ejecuta el procedimiento
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                // Agrega los parametros de salida
+                salidaXML = cmd.AddOutPutMaxString(ConstantesServicio.General.PARAMETRO_TABLA_XML);
+                cmd.CommandTimeout = 60;
+                cmd.AddParameters(parametros);
+            },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            if (salidaXML.Value == null || salidaXML.Value == DBNull.Value)
+            {
+                return new DatosXML();
+            }
+
+            return new DatosXML(salidaXML.Value.ToString());
+        }
+
+        /// <summary>
+        /// Metodo para obtener las fechas de operacion del servicio
+        /// </summary>
+        /// <param name="storedProcedure"></param>
+        /// <param name="parametros">Parametros de actualización, filtrado y valores de retorno</param>
+        /// <returns></returns>
+        public async Task<List<FechasSistemaDTO>> ObtenerFechasAsync(string storedProcedure, CancellationToken ct, List<SqlParameter> parametros = null)
+        {
+            StoredProcedureResult<FechasSistemaDTO> resultado =
+                await EjecutarStoredProcedureQuery<FechasSistemaDTO>(
+                storedProcedure, cmd =>
+                {
+                    cmd.CommandTimeout = 60;
+                    cmd.AddParameters(parametros);
+                }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+        }
+
+        /// <summary>
+        /// Metodo para obtener los parametros de BBVA
+        /// </summary>
+        /// <param name="storeProcedure">Nombre del procedimiento almacenado</param>
+        /// <returns>Diccionario de datos</returns>
+        public async Task<Dictionary<string, string>> ObtenerParametrosBBVAAsync(string storeProcedure, CancellationToken ct)
+        {
+            var resultado = await EjecutarStoredProcedureQuery<Parametro>(storeProcedure, null, ct);
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            Dictionary<string, string> parametrosSistema = new Dictionary<string, string>();
+            foreach (var parametro in resultado.Data ?? Enumerable.Empty<Parametro>())
+            {
+                if (parametro == null || string.IsNullOrWhiteSpace(parametro.Nombre))
+                {
+                    continue;
+                }
+
+                if (parametrosSistema.ContainsKey(parametro.Nombre))
+                {
+                    _log.Info($"{ConstantesClaveAviso.Error}|obtenerParametrosSistema|El parámetro '{parametro.Nombre}' está duplicado en la base de datos.");
+                    continue;
+                }
+
+                parametrosSistema.Add(parametro.Nombre, (string)parametro.Valor);
+            }
+
+            return parametrosSistema;
+        }
+
+        /// <summary>
+        /// Método que permite obtener lista Esquema
+        /// </summary>
+        /// <param name="storeProcedure">Nombre del procedimiento almacenado</param>
+        /// <returns></returns>
+        public async Task<List<TipoEsquemaDto>> ObtenerTipoEsquema(string storeProcedure, CancellationToken ct)
+        {
+            var resultado = await EjecutarStoredProcedureQuery<TipoEsquemaDto>(storeProcedure, null, ct);
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+
+        }
+
+        /// <summary>
+        /// Método que permite el registro de cuentas de conciliación
+        /// </summary>
+        /// <param name="storedProcedure">Nombre del procedimiento almacenado</param>
+        /// <param name="items">Lista de elementos de tipo [ConciliacionIT24_VT24Dto]</param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> EliminaAgregaDataConciliacionTomiT24Async(string storedProcedure, CancellationToken ct,  List<ConciliacionIT24_VT24Dto> items)
+        {
+            SqlParameter paramEliminados = null;
+            SqlParameter paramAgregados = null;
+            //Convierte la lista de elementos en un DataTable para poder pasarlo como parametro
+            DataTable dt = Utilidades.ToDataTable(items);
+            var paraTableType = new SqlParameter("@tblConciliacionType", SqlDbType.Structured)
+            {
+                TypeName = "dbo.ConciliacionT24Type",
+                Value = dt
+            };
+
+            var resultado = await EjecutarStoredProceduredNonQuery(storedProcedure, cmd =>
+            {
+                cmd.AddTableTypeParam("@tblConciliacionType", "dbo.ConciliacionT24Type", dt);
+                paramEliminados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_ELIMINADOS);
+                paramAgregados = cmd.AddOutPutInt(ConstantesServicio.General.PARAMETRO_AGREGADOS);
+            }, ct);
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            int eliminados = paramEliminados.GetValueOrDefault<int>();
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+
+            return new ResultadoSp(eliminados, agregados, 0, resultado.Exito);
+
+        }
+
+        /// <summary>
+        /// Método para insertar clientes validados
+        /// </summary>
+        /// <param name="storedprocedure"></param>
+        /// <returns></returns>
+        public async Task<ResultadoSp> InsertaClientesValidadosAsync(string storedprocedure, CancellationToken ct)
+        {
+            var paramAgregados = basedatosConexion.CrearParametroSalida(ConstantesServicio.General.PARAMETRO_AGREGADOS, DbType.Int32);
+            var resultado = await EjecutarStoredProceduredNonQuery(storedprocedure, cmd =>
+            {
+                cmd.Parameters.Add(paramAgregados);
+            }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+            
+            int agregados = paramAgregados.GetValueOrDefault<int>();
+            return new ResultadoSp(0, agregados, 0, resultado.Exito);
+        }
+
+        /// <summary>
+        /// Método para obtener entradas SPEI
+        /// </summary>
+        /// <param name="storedProcedure"></param>
+        /// <param name="parametros"></param>
+        /// <returns></returns>
+        public async Task<List<SalidasSpid>> ObtenerEntradasSpeiAsync(string storedProcedure,  CancellationToken ct, List<SqlParameter> parametros)
+        {
+            StoredProcedureResult<SalidasSpid> resultado =
+                await EjecutarStoredProcedureQuery<SalidasSpid>(
+                storedProcedure, cmd =>
+                {
+                    cmd.Parameters.Clear();
+                    cmd.CommandTimeout = 60;
+                    cmd.AddParameters(parametros);
+                }, ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+        }
+
+
+        /// <summary>
+        /// Método para obtener Entradas SPID
+        /// </summary>
+        /// <param name="storedProcedure"></param>
+        /// <param name="parametros"></param>
+        /// <returns></returns>
+        public async Task<List<SalidasSpid>> ObtenerEntradasSpidAsync(string storedProcedure,CancellationToken ct, List<SqlParameter> parametros)
+        {
+            StoredProcedureResult<SalidasSpid> resultado =
+                await EjecutarStoredProcedureQuery<SalidasSpid>(
+                storedProcedure, cmd =>
+                {
+                    cmd.CommandTimeout = 60;
+                    cmd.AddParameters(parametros);
+                },ct);
+
+            if (!string.IsNullOrEmpty(resultado.MensajeError))
+            {
+                _log.Error($"{MsgLog.ERROR_PROCESO_ENBD}: {resultado.MensajeError}");
+                throw new Exception(resultado.MensajeError);
+            }
+
+            return resultado.Data;
+        }
+
+
+    }
+}
+
+
+using AplicacionReplicas.Comunes;
+using AplicacionReplicas.Interfaces;
+using AplicacionReplicas.Modelos;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+using static AplicacionReplicas.Enums.ConstantesServicio;
+
+namespace AplicacionReplicas
+{
+
+    /// <summary>
+    /// OperacionServicio - clase que contiene el flujo principal del procesamiento (equivalente a Definiciones).
+    /// </summary>
+    public class OperacionServicio : IEjecucionServicio
+
+    {
+        #region Propiedades
+        private readonly Configuracion _configuracion;
+        private readonly IControlServicio _controlServicio;
+        private readonly IAlertas _alertas;
+        private readonly IParametrizacion _parametrizacion;
+        private readonly IProcesoServicio _procesoServicio;
+        private readonly ParametrosConfiguracion _paramConfig;
+        private readonly IControlErrorService _ctrlErrorService;
+        private readonly ILoggerService _log;
+        private readonly IExtensionAlerta _extAlerta;
+        private readonly IDAO_TOMI _repTomi;
+
+        #endregion
+
+        /// <summary>
+        /// Constructor.
+        /// </summary>
+        public OperacionServicio(
+            Configuracion configuracion
+            , IControlServicio controlServicio
+            , IAlertas alertas
+            , IParametrizacion parametrizacion
+            , IProcesoServicio procesoServicio
+            , ParametrosConfiguracion paramConfig
+            , IControlErrorService ctrlErrorService
+            , ILoggerService log
+            , IExtensionAlerta extAlerta
+            , IDAO_TOMI repTomi
+         )
+        {
+            _configuracion = configuracion;
+            _controlServicio = controlServicio;
+            _alertas = alertas;
+            _parametrizacion = parametrizacion;
+            _procesoServicio = procesoServicio;
+            _paramConfig = paramConfig;
+            _ctrlErrorService = ctrlErrorService;
+            _log = log;
+            _extAlerta = extAlerta;
+            _repTomi = repTomi;
+        }
+
+        /// <summary>
+        /// Control del flujo principal del procesamiento.
+        /// </summary>
+        public async Task<bool> EjecutarServicioAsync(CancellationToken ct)
+        {
+            bool ejecutaServicio = false;
+            Dictionary<string, string> ParametrosSistema = null;
+            try
+            {
+                _log.Info(MsgLog.EjecutaServicio.Inicio);
+                // Marca que el servicio está en ejecución
+                await _controlServicio.ActualizaEJecucion(_configuracion.NombreServicio);
+                _configuracion.FechaSistema = await _parametrizacion.ObtenerFechaSistemaAsync();
+
+                if (_paramConfig.HORA_REPLICA_INICIO == TimeSpan.Zero)
+                    ParametrosSistema = await _parametrizacion.ObtenerParametrosSistemaAsync(stringParametros, ct);
+
+                //Validaciones de parametros y horarios de operacion                  
+                if (await AsignaValidaParametros.ParametrosAsync(_configuracion, ParametrosSistema, _paramConfig, _repTomi, ct, _log))
+                    ejecutaServicio = true;
+               
+
+                // Proceso principal                
+                if (ejecutaServicio)
+                {
+                    var result = await _procesoServicio.RealizaOperacionesAsync(ct);
+                    if (!result)
+                        throw new ApplicationException(MsgLog.EjecutaServicio.ErrorEjecucionServicio);
+                }
+                return true;
+
+            }
+            catch (Exception ex) when (ex.GetType() != typeof(Exception))
+            {
+                if (ex is InvalidOperationException)
+                {
+                    _log.Info($"{MsgLog.EjecutaServicio.Exception}:{ex.Message}");
+                }
+                else
+                {
+                    //solo manda alerta para errores criticos
+                    _log.Error($"{MsgLog.EjecutaServicio.Exception}:{ex.Message}");
+                    await _extAlerta.RegistraErrorAsync(ex.Message, ct);
+                }
+            }
+            catch (Exception ex)
+            {                
+                _log.Error($"{MsgLog.EjecutaServicio.Exception}:{ex.Message}");
+                await _extAlerta.RegistraCriticoAsync(ex,ct);
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                // Marca el fin de la ejecucion del servicio.
+               await _controlServicio.ActualizaTerminacion(_configuracion.NombreServicio,ct);                
+                _log.Info(MsgLog.EjecutaServicio.Fin);
+            }
+
+            return false;
+        }
+
+
+    }
+}
+
+
+using AplicacionReplicas.Comunes;
+using AplicacionReplicas.DTOs;
+using AplicacionReplicas.DTOs.VT24;
+using AplicacionReplicas.Interfaces;
+using AplicacionReplicas.Modelos;
+using BBVACommon;
+using BBVACommon.Interfaces;
+using MUFG_T24.Configuracion_utilidades;
+using MUFG_T24.Interfaces_utilidades;
+using MUFG_T24.Modelos;
+using System;
+using System.Collections.Generic;
+using System.Data.SqlClient;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Xml.Linq;
+using static AplicacionReplicas.Enums.ConstantesServicio;
+using static AplicacionReplicas.Enums.ConstantesServicio.Sp;
+
+
+
+namespace AplicacionReplicas.Servicios
+{
+    /// <summary>
+    /// Clase de ejecucion de procesos
+    /// </summary>
+    public class ProcesoServicio : IProcesoServicio
+    {
+        #region DAO
+        private readonly IDAO_CMS _daoCms;
+        private readonly IDAO_SPEI _daoSpei;
+        private readonly IDAO_SPID _daoSpid;
+        private readonly IDAO_TEF _daoTef;
+        private readonly IDAO_TOMI _daoTomi;
+        private readonly IDAO_TOMIHIST _daoTomiHist;
+        private readonly IDAO_VT24 _daoVt24;
+        #endregion
+
+        #region Propiedades
+        private readonly Configuracion _configuracion;
+        private string TablaXML { get; set; }        
+        private DatosXML DatosXML { get; set; }        
+        private ResultadoSp ResultadoSp { get; set; }
+        private ResultadoSpAutorizaCancela ResultadoSpAutorizaCancela { get; set; }
+        private List<CuentasCliente> _ctasClientes;
+        private readonly IParametrizacion _parametrizacion;
+        private readonly IControlErrorService _ctrlErrorService;
+        private readonly IEmailService _emailService;
+        private readonly ParametrosConfiguracion _paramConfig;
+        private readonly IExtensionAlerta _extAlerta;
+        private readonly ITsecClient _tsecClient;
+        private readonly ILoggerService _log;
+
+        #endregion
+
+        #region Constructor
+        public ProcesoServicio(
+            IDAO_CMS daoCms
+            , IDAO_SPEI daoSpei
+            , IDAO_SPID daoSpid
+            , IDAO_TEF daoTef
+            , IDAO_TOMI daoTomi
+            , IDAO_TOMIHIST daoTomiHist
+            , IDAO_VT24 daoVT24
+            , Configuracion configuracion            
+            , ParametrosConfiguracion parametrosConfiguracion
+            , IParametrizacion parametrizacion
+            , IControlErrorService ctrlErrorService
+            , IEmailService emailService
+            , IExtensionAlerta extAlerta
+            , ITsecClient tsecClient
+            , ILoggerService log
+         )
+        {
+            _daoCms = daoCms;
+            _daoSpei = daoSpei;
+            _daoSpid = daoSpid;
+            _daoTef = daoTef;
+            _daoTomi = daoTomi;
+            _daoTomiHist = daoTomiHist;
+            _daoVt24 = daoVT24;
+            _configuracion = configuracion;
+            _paramConfig = parametrosConfiguracion;
+            _parametrizacion = parametrizacion;
+            _ctrlErrorService = ctrlErrorService;
+            _emailService = emailService;
+            _extAlerta = extAlerta;
+            _tsecClient = tsecClient;
+            _log = log;
+        }
+        #endregion
+
+        #region Main
+        /// <summary>
+        /// Procesos principales el servicio
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> RealizaOperacionesAsync(CancellationToken ct)
+        {
+            _ctasClientes = await ObtenerCuentasAsync(ct);
+            if (!await ObtenerFechasTOMIAsync(ct))
+            {
+                return false;
+            }
+
+            await ObtenerFechaJulianaAsync(ct);
+
+            _paramConfig.FechaServidor = DateTime.Today;
+            TimeSpan lsHoraSistema = DateTime.Now.TimeOfDay;
+            _log.Info($"RealizaOperaciones|Fecha Sistema: [{_paramConfig.FechaSistema}], Fecha Anterior [{_paramConfig.FechaAnterior}], Fecha Servidor [{_paramConfig.FechaServidor.ToString(General.FORMATO_FECHA_SQL)}]");
+            
+            _ = await ObtenerCuentasCMSAsync(ct);
+
+            if (_paramConfig.IniciandoServicio)
+            {
+                _log.Info("RealizaOperaciones|Ejecuta operaciones iniciales del servicio");
+                _ = await BorrarOperacionesSinFondosTOMIAsync(ct);                    
+                _ = await ActualizarSaldosCuentasCMSAsync(ct);
+                _ = await ActualizarCashPoolingGroupsAsync(ct);                     
+                _ = await ActualizarCashPoolingAccountsAsync(ct);                    
+                _ = await ActualizarCashPoolingTrxAsync(ct);
+                _log.Info("RealizaOperaciones|Finaliza Ejecucion de operaciones iniciales del servicio");
+            }
+
+            _ = await MonitoreoBBVAAsync(ct);
+            _ = await ValidarOperacionesEnviadasAsync(ct);
+            var lbRet_Cuentas = await ActualizarCuentasAsync(ct);
+            var lbRet_ops_CEP = await ActualizarOpsCepSPEIAsync(ct);
+            var lbRet_ops_CEP_SPID = await ActualizarOpsCepSPIDAsync(ct);
+            _ = await InsertarTimeDepositEspecialAsync(ct);
+            _ = await ActualizarTimeDepositEspecialAsync(ct);
+            var lbRet_CuentasCMS = await ActualizarInfoCuentasAsync(ct);
+            var lbRet_Clientes_SPID = await ActualizarClientesSPIDAsync(ct);                            
+            _ = await ActualizarClientesTMDAsync(ct);
+            var lbRet_ECRate = await ActualizarECRateAsync(ct);            
+            _ = await ActualizarMarginRateAsync(ct);
+            var lbRet_TasaRetencion = await ActualizarTasaRetencionAsync(ct);
+            var lbRet_ClientesISR = await ActualizarClientesSinISRAsync(ct);            
+            _ = await ActualizarMontosMinimosTMDAsync(ct);            
+            _ = await ActualizarClientesNonResidenceTMDAsync(ct);
+
+            #region ACTUALIZACIONES SPEI
+            //' Actualizacion de listas SPEI
+            if (lsHoraSistema.Hours == _paramConfig.SPEI_HORA_ACT_PARTICIPANTES.Hours)
+            {
+                if (!_paramConfig.GbYaActualiceListaParticipantesSPEI)
+                {
+                    if (await ActualizaListaParticipantesSPEIAsync(ct))
+                    {
+                        //' Marco como que la lista ya fue actualizada
+                        _paramConfig.UltimaActualizacionParticipantesSPEI = DateTime.Now;
+                        _paramConfig.GbYaActualiceListaParticipantesSPEI = true;
+                    }
+                }
+            }
+
+            //' Actualización de lista de participantes SPEI por intervalo
+            if ((lsHoraSistema > _paramConfig.SPEI_HORA_ACT_PARTICIPANTES) && (lsHoraSistema < _paramConfig.SPEI_HORA_FIN_ACT_PARTICIPANTES) && (_paramConfig.SPEI_INTERVALO_ACTUALIZACION > 0))
+            {
+                if (_paramConfig.UltimaActualizacionParticipantesSPEI.AddSeconds(_paramConfig.SPEI_INTERVALO_ACTUALIZACION) < DateTime.Now)
+                {
+                    if (await ActualizaListaParticipantesSPEIAsync(ct))
+                    {
+                        _paramConfig.UltimaActualizacionParticipantesSPEI = DateTime.Now;
+                    }
+                }
+            }
+
+            #endregion
+
+
+            #region ACTUALIZACIONES SPID
+            //' Actualizacion de listas SPID
+            if (lsHoraSistema.Hours == _paramConfig.SPID_HORA_ACT_PARTICIPANTES.Hours)
+            {
+                if (!_paramConfig.GbYaActualiceListaParticipantesSPID)
+                {
+                    //Actualizar listas SPID
+                    if (await ActualizaListaParticipantesSPIDAsync(ct))
+                    {
+                        _paramConfig.UltimaActualizacionParticipantesSPID = DateTime.Now;
+                        _paramConfig.GbYaActualiceListaParticipantesSPID = true;
+                    }
+
+                }
+            }
+            
+            //Actualización de lista de participantes SPID por intervalo
+            if (lsHoraSistema > _paramConfig.SPID_HORA_ACT_PARTICIPANTES && lsHoraSistema < _paramConfig.SPID_HORA_FIN_ACT_PARTICIPANTES  && _paramConfig.SPID_INTERVALO_ACTUALIZACION != 0)
+            {
+                if (_paramConfig.UltimaActualizacionParticipantesSPID.AddSeconds(_paramConfig.SPID_INTERVALO_ACTUALIZACION) < DateTime.Now)
+                {
+                    if(await ActualizaListaParticipantesSPIDAsync(ct))
+                    {
+                        //' Marco como que la lista ya fue actualizada
+                        _paramConfig.UltimaActualizacionParticipantesSPID= DateTime.Now;
+                    }
+                }
+
+            }
+
+            #endregion
+
+            
+            //'Actualización de operaciones pendientes.
+            if (lsHoraSistema > _paramConfig.HORA_OP_FIN)
+            {
+                _ = await ActualizaOperacionesPendientesAsync(ct);                
+            }
+
+            //'Actualiza Conciliacion de Operaciones CMS
+            _ = await ActualizarCMSConciliacionAsync(ct);
+
+            //'Actualiza Conciliacion de Operaciones Interfaces
+            _ = await ActualizarInterfacesConciliacionAsync(ct);
+
+            //'Actualiza Conciliacion de Operaciones Swift IN
+            _ = await ActualizarSwiftInConciliacionAsync(ct);
+
+            //'Actualiza Conciliacion de Operaciones TAS
+            _ = await ActualizarTASConciliacionAsync(ct);
+
+            //'Actualiza Conciliacion de Operaciones T24
+            _ = await ActualizarT24ConciliacionAsync(ct);
+
+            //'Actualiza Cuentas TEF
+            _ = await ActualizarCuentasT24TEFAsync(ct);
+
+            if(_paramConfig.IniciandoServicio && lbRet_Cuentas && lbRet_ops_CEP && lbRet_ops_CEP_SPID && lbRet_CuentasCMS && lbRet_Clientes_SPID && lbRet_ECRate && lbRet_TasaRetencion && lbRet_ClientesISR)
+            {
+                _log.Info("RealizaOperaciones|A actualizar la bandera de IniciandoServicio a False.");
+                _paramConfig.IniciandoServicio = false;
+            }
+            else
+            {
+                _log.Info("RealizaOperaciones|Fin de ciclo de actualización.");
+            }            
+            return true;
+        }
+        #endregion
+
+        /// <summary>
+        /// Obtener las cuentas de los clientes
+        /// </summary>
+        /// <returns></returns>
+        private async Task<List<CuentasCliente>> ObtenerCuentasAsync(CancellationToken ct)
+        {
+
+            try
+            {
+                _log.Info("ObtenerCuentas|Inicio");
+                var result = await _daoTomi.ObtenerCuentasClienteAsync(ct);
+                _log.Info($"ObtenerCuentas|Se terminó la carga de [{result.Count}]  Cuentas.");
+                return result;
+
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"ObtenerCuentas|Se presenta Exception: {ex.Message}");
+            }
+            finally
+            {
+                _log.Info("ObtenerCuentas|Fin");
+            }
+            return new List<CuentasCliente>();
+        }
+
+
+
+
+        /// <summary>
+        /// Actualliza participantes SPEI
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizaListaParticipantesSPEIAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizaListaParticipantesSPEI");
+                List<ParticipanteSpeiSpidDTO> participantesSPEI = await _daoSpei.ObtenerParticipantesAsync(Spei.spInterfaceTomiSpeiParticipantes,ct);
+
+                //XDocument xmlParticipantesSPEI_1 = Utilidades.Utilidades.ListToXML(participantesSPEI);
+                XDocument xmlParticipantesSPEI = Utilidades.Utilidades.ConvertirAXml(participantesSPEI);
+                TablaXML = xmlParticipantesSPEI.ToString();
+                if (string.IsNullOrEmpty(TablaXML))
+                {
+                    _log.Info($"RealizaOperaciones|ActualizaListaParticipantesSPEI|No existen participantes para actualizar");
+                    return true; ;
+                }
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaParticipantesSpeiCMS, ct,new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML));
+                List<SqlParameter> parametros2 = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoTomi.EliminarAgregarAsync(Tomi.uspActualizaParticipantesSpeiTOMI,ct, parametros2);
+                _log.Info($"RealizaOperaciones|ActualizaListaParticipantesSPEI Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizaListaParticipantesSPEI|Se presenta exception: {ex.Message}");
+                await _extAlerta.RegistraCriticoAsync(ex.Message, ex,ct);
+                throw;
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizaListaParticipantesSPEI|Fin");
+            }
+            
+        }
+
+        /// <summary>
+        /// Actualiza participantes SPID
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizaListaParticipantesSPIDAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizaListaParticipantesSPID|Inicio");
+                List<ParticipanteSpeiSpidDTO> participantesSPID = await _daoSpid.ObtenerParticipantesAsync(Spid.spInterfaceTomiSpidParticipantes,ct);
+
+                //XDocument xmlParticipantesSPID = Utilidades.Utilidades.ListToXML(participantesSPID);
+                XDocument xmlParticipantesSPID = Utilidades.Utilidades.ConvertirAXml(participantesSPID);
+                TablaXML = xmlParticipantesSPID.ToString();
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaParticipantesSpidCMS,ct, parametros);
+                List<SqlParameter> parametros2 = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoTomi.EliminarAgregarAsync(Tomi.uspActualizaParticipantesSpidTOMI,ct, parametros2);
+                _log.Info($"RealizaOperaciones|ActualizaListaParticipantesSPID Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                await _extAlerta.RegistraCriticoAsync(ex.Message, ex,ct);
+                throw;
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizaListaParticipantesSPID|Fin");
+            }
+            
+        }
+
+        /// <summary>
+        /// Actualiza Operaciones pendientes
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizaOperacionesPendientesAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizaOperacionesPendientes|Inicio");
+                string catalogoXML;
+
+                DatosXML = await _daoTomi.ObtenerDatosAsync(Tomi.uspObtenerCodigosErrorTOMI,ct);
+                catalogoXML = DatosXML.TablaXML;
+
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@FechaSistema", _paramConfig.FechaSistema);
+                DatosXML = await _daoTomi.ObtenerDatosAsync(Tomi.uspObtenerOperacionesPorCancelarTOMI,ct, parametros);
+                TablaXML = DatosXML.TablaXML;
+
+                parametros.Clear();                
+                parametros.AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoTomi.ActualizarAsync(Tomi.uspCancelaOperacionesPendientesTOMI,ct, parametros);
+
+                parametros.Clear();
+                parametros.AddStringParameter("@TablaCodigosXML", catalogoXML);
+                parametros.AddStringParameter("@TablaOperacionesXML", TablaXML);                
+                ResultadoSp = await _daoCms.ActualizarAsync(Cms.uspActualizaOperacionesPendientesCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizaOperacionesPendientes Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizaOperacionesPendientes|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizaOperacionesPendientes|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actualizar las cuentas
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarCashPoolingAccountsAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCashPoolingAccounts|Inicio");
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerCashPoolingAccountsVT24,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaCashPoolingAccountsCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarCashPoolingAccounts Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarCashPoolingAccounts|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCashPoolingAccounts|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Método para actualizar Cash poling groups
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarCashPoolingGroupsAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCashPoolingGroups1Inicio");
+
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerCashPoolingGroupsVT24,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaCashPoolingGroupsCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarCashPoolingGroups Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarCashPoolingGroups|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCashPoolingGroups|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para actualizar Trx
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarCashPoolingTrxAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCashPoolingTrx|Inicio");
+                string lastWorkingDay, tablaCuentasXML;
+                lastWorkingDay = await _daoVt24.ObtenerDatoAsync(Vt24.uspObtenerLastWorkingDayT24,ct);                                                
+                DatosXML = await _daoCms.ObtenerDatosAsync(
+                    Cms.uspObtenerCashPoolAccountsCMS
+                    ,ct
+                    , new List<SqlParameter>().AddDateTimeParameter("@LastWorkingDay", lastWorkingDay.StringToDate()));
+                tablaCuentasXML = DatosXML.TablaXML;
+
+                var parametros = new List<SqlParameter>()
+                .AddStringParameter("@ProcessDate", lastWorkingDay,8)
+                .AddStringParameter("@TablaCuentasXML", tablaCuentasXML);
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerCashPoolingTrxVT24,ct, parametros);
+                TablaXML = DatosXML.TablaXML;
+
+                parametros.Clear();
+                parametros.AddDateTimeParameter("@LastWorkingDay", lastWorkingDay.StringToDate())
+                    .AddStringParameter("@TablaCuentasXML", tablaCuentasXML)
+                    .AddStringParameter("@TablaXML", TablaXML);
+                if (string.IsNullOrEmpty(TablaXML))
+                {
+                    ResultadoSp = new ResultadoSp(0, 0, 0, false);
+                }
+                else
+                {
+                    ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaCashPoolingTrxCMS,ct, parametros);
+                }
+                _log.Info($"RealizaOperaciones|ActualizarCashPoolingTrx Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarCashPoolingTrx|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCashPoolingTrx");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actualizar clientes no residentes
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarClientesNonResidenceTMDAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarClientesNonResidenceTMD|inicio");
+                DatosXML = await _daoTomi.ObtenerDatosAsync(Tomi.uspObtenerClientesNoResidentesTOMI,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaClientesNoResidentesCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarClientesNonResidenceTMD Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarClientesNonResidenceTMD|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarClientesNonResidenceTMD|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actualizar clientes sin ISR
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarClientesSinISRAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarClientesSinISR|Inicio");
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerClientesSinIsrVT24,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaClientesSinIsrCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarClientesSinISR Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarClientesSinISR|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarClientesSinISR|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para actualiza clientes SPID
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarClientesSPIDAsync(CancellationToken ct)
+        {
+            try
+            {
+                //'CLIENTES SPID PARA REPLICAR A CMS
+                _log.Info($"RealizaOperaciones|ActualizarClientesSPID|Inicio");
+                DatosXML = await _daoTomi.ObtenerDatosAsync(Tomi.uspObtenerClientesSpidTOMI,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaClientesSpidCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarClientesSPID Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+
+
+                //'CLIENTES SPID PARA VALIDAR
+                _log.Info("RealizaOperaciones|ActualizarClientesSPID|Buscando clientes a Validar");
+
+                var clienteInserar = await _daoTomi.InsertaClientesValidadosAsync(Tomi.uspInsertaClientesValidadosSpidTOMI,ct);
+                _log.Info($"RealizaOperaciones|ActualizarClientesSPID|Se insertaron {clienteInserar.Agregados} clientes para validar");
+
+                //'PERMISOS CMS
+                _log.Info("RealizaOperaciones|ActualizarClientesSPID|Actualizando Permisos y Parametros en CMS");
+                var Permisos = await _daoCms.ActualizaPermisosAsync(Cms.uspActualizaPermisosSpidCMS,ct);
+                _log.Info($"RealizaOperaciones|ActualizarClientesSPID|Se actualizaron [{Permisos.Actualizados}] Permisos de clientes");
+                _log.Info($"RealizaOperaciones|ActualizarClientesSPID|Se insertaron [{Permisos.Agregados}] parametros generales SPID");
+
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarClientesSPID|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarClientesSPID|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para actualiza clientes TMD
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarClientesTMDAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarClientesTMD|Inicio");
+                ResultadoSp = await _daoCms.ActualizarAgregarAsync(Cms.uspActualizaClientesTmdCMS,ct);
+                _log.Info($"RealizaOperaciones|ActualizarClientesTMD Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarClientesTMD|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarClientesTMD|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actulizar cuentas de Conciliacion
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarCMSConciliacionAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarSaldosCuentasCMS|Inicio");
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@FechaSistema", _paramConfig.FechaSistema);
+                DatosXML = await _daoCms.ObtenerDatosAsync(Cms.uspObtenerFormatosConciliacionCMS,ct, parametros);
+                TablaXML = DatosXML.TablaXML;
+
+                parametros.Clear();                
+                parametros.AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoTomi.EliminarAgregarAsync(Tomi.uspActualizaFormatosConciliacionTOMI,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarSaldosCuentasCMS Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarSaldosCuentasCMS|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarSaldosCuentasCMS|Fin");
+            }
+            return false; 
+        }
+
+        /// <summary>
+        /// Metodo para actualizar cuentas
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarCuentasAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCuentas|Inicio");
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerCuentasVT24,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaCatalogoCuentasT24CMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarCuentas|Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarCuentas|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCuentas|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para actualiza cuenta TEF
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarCuentasT24TEFAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCuentasT24TEF|inicio");
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerCuentasTefVT24,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoTef.EliminarAgregarAsync(Tef.uspActualizaCuentasTEF,ct ,parametros);
+                _log.Info($"RealizaOperaciones|ActualizarCuentasT24TEF Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarCuentasT24TEF|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarCuentasT24TEF|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actualizar ECRate
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarECRateAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarECRate|Inicio");
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@FechaSistema", _paramConfig.FechaSistema_T24_Juliana);
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerEcRateProductsVT24,ct, parametros);
+                TablaXML = DatosXML.TablaXML;
+
+                parametros.Clear();
+                parametros.AddStringParameter("@FechaSistema", _paramConfig.FechaSistema_T24_Juliana)
+                    .AddStringParameter("@TablaXML", TablaXML);                
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaEcRateCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarECRate Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarECRate|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarECRate|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actualiza información de cuentas
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarInfoCuentasAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarInfoCuentas|Inicio");
+                DatosXML = await _daoCms.ObtenerDatosAsync(Cms.uspObtenerCuentasCMS,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaCuentasXML", TablaXML);
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerInfoCuentasVT24,ct, parametros);
+                TablaXML = DatosXML.TablaXML;
+
+                parametros.Clear();
+                parametros.AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaCuentaInfoCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarInfoCuentas Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarInfoCuentas|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarInfoCuentas|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para actualizar interfaces de conciliacion
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarInterfacesConciliacionAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarInterfacesConciliacion|Inicio");
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@FechaSistema", _paramConfig.FechaSistema);
+                ResultadoSp = await _daoTomi.EliminarAgregarAsync(Tomi.uspActualizaConciliacionInterfacesTOMI,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarInterfacesConciliacion Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarInterfacesConciliacion|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarInterfacesConciliacion|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actualizar margin Rate
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarMarginRateAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarMarginRate|inicio");
+                DatosXML = await _daoTomi.ObtenerDatosAsync(Tomi.uspObtenerMarginRateTOMI,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaMarginRateCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarMarginRate Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarMarginRate|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarMarginRate|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actualizar montos minimos
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarMontosMinimosTMDAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarMontosMinimosTMD|Inicio");
+                DatosXML = await _daoTomi.ObtenerDatosAsync(Tomi.uspObtenerMontoMinimoTOMI,ct);
+                TablaXML = DatosXML.TablaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaMontoMinimoCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarMontosMinimosTMD Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarMontosMinimosTMD|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarMontosMinimosTMD|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para actualizar Operaciones CepSPEI
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarOpsCepSPEIAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPEI|Inicio");
+                //------SALIDAS
+
+                var fecha = _paramConfig.FechaServidor.ToString(General.FORMATO_FECHA_SQL);
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@Fecha", fecha)
+                    .AddStringParameter("@Folio", "0");
+                List<SalidasSpid> salidaSpei = await _daoSpei.ObtenerSalidaAsync(Spei.uspObtenerSalidasSPEI,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPEI|Elimina operaciones antiguas");
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPEI|A punto de insertar {salidaSpei.Count} operaciones SPEI de salida.");
+
+                ResultadoSp = await _daoCms.EliminaAgregaOperacionesSpei(salidaSpei, _ctasClientes,ct);
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPEI|Se actualizaron operaciones SPEI de salida, operaciones: {salidaSpei.Count}.");
+
+
+                //------ENTRADAS
+                //Obtenemos las entradas spei pero ahora de tomi
+                List<SqlParameter> parametrosF = new List<SqlParameter>().AddStringParameter("@Fecha", _paramConfig.FechaServidor.ToString(General.FORMATO_FECHA_SQL));
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPEI|Buscando y llenando colección de datos de Entradas SPEI.");
+                List<SalidasSpid> entradasSpeiTomi = await _daoTomi.ObtenerEntradasSpeiAsync(Tomi.uspObtenerEntradasSpeiTOMI,ct, parametrosF);
+
+
+                List<SqlParameter> parametrosF2 = new List<SqlParameter>().AddStringParameter("@Fecha", _paramConfig.FechaServidor.ToString(General.FORMATO_FECHA_SQL));
+                //obtener entradas historico de TomiHis [it24Hist]
+                List<SalidasSpid> entradasSpeiTomiHist = await _daoTomiHist.ObtenerEntradasSpeiAsync(TomiHist.uspObtenerEntradasHistSpeiTOM,ct, parametrosF2);
+                if (entradasSpeiTomiHist.Count > 0)
+                {
+                    entradasSpeiTomi.AddRange(entradasSpeiTomiHist);
+                }
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPEI|A punto de insertar {entradasSpeiTomi.Count} operaciones SPEI de entrada.");
+                //Agrega entradas            
+                ResultadoSp = await _daoCms.AgregaOperacionesEntradaSpei(entradasSpeiTomi, _ctasClientes,ct);
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPEI|Se actualizaron operaciones SPEI de entrada, operaciones= {entradasSpeiTomi.Count} ");
+
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarOpsCepSPEI|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPEI|Fin");
+            }
+            return false;
+
+
+        }
+
+        /// <summary>
+        /// Metodo para actualizar Operaciones CepSPID
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarOpsCepSPIDAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPID|Inicio");
+                var fecha = _paramConfig.FechaServidor.ToString(General.FORMATO_FECHA_SQL);
+                
+                var parametros = new List<SqlParameter>()
+                    .AddStringParameter("@Fecha", fecha)
+                    .AddStringParameter("@Folio", "0");                
+
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPID|Busca salidas Spid ");
+                var salidaSpid = await _daoSpid.ObtenerSalidaAsync(Spid.uspObtenerSalidasSPID,ct, parametros);
+                
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPID|Elimina operaciones antiguas");
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPID|A punto de insertar {salidaSpid.Count} operaciones SPID de salida.");
+                ResultadoSp = await _daoCms.EliminaAgregaOperacionesSpid(salidaSpid, _ctasClientes,ct);
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPID|Se actualizaron operaciones SPID de salida, operaciones: {salidaSpid.Count}.");
+
+                //---ENTRADAS SPID
+                //obtenemos las Entradas SPID, ahora de tomi
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPID|Buscando y llenando colección de datos de Entradas SPID.");
+                List<SqlParameter> parametrosF = new List<SqlParameter>().AddStringParameter("@Fecha", _paramConfig.FechaServidor.ToString(General.FORMATO_FECHA_SQL));
+
+                List<SalidasSpid> entradasSpidTomi = await _daoTomi.ObtenerEntradasSpidAsync(Tomi.uspObtenerEntradasSpidTOMI,ct, parametrosF);
+                //Agrega entradas                
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPID|A punto de insertar [{entradasSpidTomi.Count}] operaciones SPID de entrada.");
+                ResultadoSp = await _daoCms.AgregaOperacionesEntradaSpid(entradasSpidTomi, _ctasClientes,ct);
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPID|Se actualizaron operaciones SPID de entrada, Agregados: {ResultadoSp.Agregados} ");
+
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarOpsCepSPID|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarOpsCepSPID|Fin");
+            }
+            return false;
+        }
+
+
+        /// <summary>
+        /// Metodo para actualizar los saldos de las cuentas
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarSaldosCuentasCMSAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info("RealizaOperaciones|ActualizarSaldosCuentasCMS|Inicio");
+
+                var parametros = new List<SqlParameter>()
+                    .AddStringParameter("@FechaSistemaAnt", _paramConfig.FechaAnterior)
+                    .AddStringParameter("@TablaCuentasXML", TablaXML);
+                _log.Info("RealizaOperaciones|ActualizarSaldosCuentasCMS|obteniendoDatosSaldos");
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerSaldosCuentasVT24,ct, parametros);
+                TablaXML = DatosXML.TablaXML;
+
+                parametros.Clear();
+                parametros.AddStringParameter("@FechaSistemaAnt", _paramConfig.FechaAnterior)
+                    .AddStringParameter("@TablaXML", TablaXML);
+                
+                _log.Info("RealizaOperaciones|ActualizarSaldosCuentasCMS|ProcesandoDatosSaldos");
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaSaldosCuentasCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarSaldosCuentasCMS|Se eliminaron: [{ResultadoSp.Eliminados}] registros de la fecha anterior [{_paramConfig.FechaAnterior}]");
+                _log.Info($"RealizaOperaciones|ActualizarSaldosCuentasCMS|Se registraron: [{ResultadoSp.Agregados}] registros");
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarSaldosCuentasCMS|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+
+            }
+            finally
+            {
+                _log.Info("RealizaOperaciones|ActualizarSaldosCuentasCMS|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para actualizar Conciliaciones Swift
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarSwiftInConciliacionAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarSwiftInConciliacion|Inicio");
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@FechaSistema", _paramConfig.FechaSistema);
+                ResultadoSp = await _daoTomi.EliminarAgregarAsync(Tomi.uspActualizaSwiftInConciliacionTOMI,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarSwiftInConciliacion Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarSwiftInConciliacion|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarSwiftInConciliacion|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actaulizar Conciliaciones T24
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarT24ConciliacionAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarT24Conciliacion|Inicio");
+                var listvt24 = await _daoVt24.ObtenerDataVwT24Account(Vt24.uspObtenerDataCuentasConciliacion,ct);
+                var listTipoEsquemas = await _daoTomi.ObtenerTipoEsquema(Tomi.uspObtenerTipoEsquemaTOMI,ct);
+
+                var vwT24Account = from v in listvt24
+                                   join t in listTipoEsquemas
+                                   on v.TipoT24 equals t.T24_trx_type
+                                   into vt
+                                   from t in vt.DefaultIfEmpty()
+                                   select new ConciliacionIT24_VT24Dto()
+                                   {
+                                       Maestro = v.Maestro,
+                                       TipoT24= v.TipoT24,
+                                       FolioT24= v.FolioT24,
+                                       Cdl = v.Cdl,
+                                       CuentaDebito = v.CuentaDebito,
+                                       CuentaCredito = v.CuentaCredito,
+                                       Moneda = v.Moneda,
+                                       Importe = v.Importe,
+                                       Fecha = v.Fecha,
+                                       FolioUnico = v.FolioUnico,
+                                       TipoTOMI = t?.MW_operation
+                                   };
+                var lista = vwT24Account.ToList();
+                ResultadoSp = await _daoTomi.EliminaAgregaDataConciliacionTomiT24Async(Tomi.uspInsertaConciliacionInterfacesTOMI,ct, lista);                
+                _log.Info($"RealizaOperaciones|ActualizarT24Conciliacion Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;                
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarT24Conciliacion|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarT24Conciliacion|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para actualizar tasa de retenciones
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarTasaRetencionAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarTasaRetencion|Inicio");
+                DatosXML = await _daoVt24.ObtenerDatosAsync(Vt24.uspObtenerTasaRetencionVT24,ct);
+                TablaXML = DatosXML.TablaXML;
+
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSp = await _daoCms.EliminarAgregarAsync(Cms.uspActualizaTasaRetencionCMS,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarTasaRetencion Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarTasaRetencion|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarTasaRetencion|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Metodo para actualiza Tas Conciliacion
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarTASConciliacionAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarTASConciliacion|Inicio");
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@FechaSistema", _paramConfig.FechaSistema);
+                ResultadoSp = await _daoTomi.EliminarAgregarAsync(Tomi.uspActualizaTasConciliacionTOMI,ct, parametros);
+                _log.Info($"RealizaOperaciones|ActualizarTASConciliacion Actualizados: {ResultadoSp.Actualizados} Agregados: {ResultadoSp.Agregados} Eliminados: {ResultadoSp.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarTASConciliacion|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarTASConciliacion|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para actualizar TimeDepositEspecial
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ActualizarTimeDepositEspecialAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|ActualizarTimeDepositEspecial|Inicio");                
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@FechaSistema", _paramConfig.FechaSistema);
+                DatosXML = await _daoCms.ObtenerDatosAsync(Cms.uspObtenerTmdEspecialesCMS,ct, parametros);
+                TablaXML = DatosXML.TablaXML;
+
+                var parametros2 = new List<SqlParameter>()
+                    .AddStringParameter("@FechaSistema", _paramConfig.FechaSistema)
+                    .AddStringParameter("@TablaXML", TablaXML);
+                ResultadoSpAutorizaCancela = await _daoTomi.AutorizarCancelarAsync(Tomi.uspActualizaTMDEspecialesTOMI,ct, parametros2);
+                _log.Info($"RealizaOperaciones|ActualizarTimeDepositEspecial Autorizados: {ResultadoSpAutorizaCancela.Autorizados} Cancelados: {ResultadoSpAutorizaCancela.Cancelados}");
+                return ResultadoSpAutorizaCancela != null;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ActualizarTimeDepositEspecial|Se presenta exception: {ex.Message}");
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|ActualizarTimeDepositEspecial|Fin");
+            }
+            return false;
+
+        }
+
+        /// <summary>
+        /// Método para borrar operaciones sin fondos
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> BorrarOperacionesSinFondosTOMIAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info("RealizaOperaciones|BorrarOperacionesSinFondos|Inicio");
+                ResultadoSp = await _daoTomi.EliminarAsync(Tomi.uspEliminaOperacionesSinFondosTOMI,ct);
+                _log.Info($"RealizaOperaciones|BorrarOperacionesSinFondos|Se eliminaron [{ResultadoSp.Eliminados}] Registros");
+                _ctrlErrorService.LimpiaControlError(0);
+                return ResultadoSp.Exito;
+            }
+            catch (Exception ex) {
+                _log.Error($"RealizaOperaciones|BorrarOperacionesSinFondos|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info("RealizaOperaciones|BorrarOperacionesSinFondos|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para insertar TimeDepositEspecial
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> InsertarTimeDepositEspecialAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info($"RealizaOperaciones|InsertarTimeDepositEspecial|Inicio");
+                ClavesDatosXML clavesDatosXML;
+                string tablaAutorizaXML;
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@FechaSistema", _paramConfig.FechaSistema);
+                clavesDatosXML = await _daoTomi.ObtenerClavesDatosAsync(Tomi.uspObtenerTMDEspecialTOMI,ct, parametros);
+                tablaAutorizaXML = clavesDatosXML.ClavesXML;
+                TablaXML = clavesDatosXML.TablaXML;
+
+                parametros.Clear();                
+                parametros.AddStringParameter("@TablaXML", TablaXML);
+                this.ResultadoSp = await _daoCms.AgregarAsync(Cms.uspInsertaTMDEspecialCMS,ct, parametros);
+
+
+                parametros.Clear();                
+                parametros.AddStringParameter("@TablaXML", tablaAutorizaXML);
+                var resultadoSpTomi = await _daoTomi.ActualizarAsync(Tomi.uspActualizaEstatusTMDEspecialTOMI,ct, parametros);
+
+                this.ResultadoSp.Actualizados = resultadoSpTomi.Actualizados;
+                _log.Info($"RealizaOperaciones|InsertarTimeDepositEspecial Actualizados: {resultadoSpTomi.Actualizados} Agregados: {resultadoSpTomi.Agregados} Eliminados: {resultadoSpTomi.Eliminados}");
+                _ctrlErrorService.LimpiaControlError(0);
+                return resultadoSpTomi.Exito;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|InsertarTimeDepositEspecial|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info($"RealizaOperaciones|InsertarTimeDepositEspecial|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Metodo para validar servicio API BBVA
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> MonitoreoBBVAAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info("RealizaOperaciones|MonitoreoBBVA|Inicio");
+                string checkApiBbva;
+                bool apiBbvaActiva;
+                checkApiBbva = "0";
+                List<SqlParameter> parametros = new List<SqlParameter>().AddStringParameter("@idParametro", General.CHECK_API_BBVA);
+                List<ParametroCmsDTO> _parametrosCmsDTO = await _daoCms.LeerParametroAsync(Cms.uspCMSObtenerParametro,ct, parametros);
+
+                if (_parametrosCmsDTO != null && _parametrosCmsDTO.Count > 0)
+                {
+                    checkApiBbva = _parametrosCmsDTO[0].Valor;                 
+                }
+                bool result = false;
+                if (checkApiBbva == "1")
+                {
+                    apiBbvaActiva = await RealizarPeticionBBVAAsync(ct);
+                    parametros.Clear();
+                    parametros.AddStringParameter("@idParametro", General.API_BBVA_ACTIVE, 30)
+                        .AddStringParameter("@Valor", ((apiBbvaActiva) ? "1" : "0"),240);
+                                     
+                    _log.Info("RealizaOperaciones|MonitoreoBBVA|Se actualiza parametro de verificación del servicio BBVA");
+                    result = await _daoCms.ActualizarParametroAsync(Cms.uspCMSActualizarParametro,ct, parametros);
+                    if (result)
+                    {
+                        parametros.Clear();
+                        parametros.AddStringParameter("@idParametro", General.CHECK_API_BBVA)
+                            .AddStringParameter("@Valor", "0");
+
+                        _log.Info($"RealizaOperaciones|MonitoreoBBVA|Se actualiza parametro de verificación de {General.CHECK_API_BBVA} , con valor: [0]");
+                        result = await _daoCms.ActualizarParametroAsync(Cms.uspCMSActualizarParametro,ct, parametros);
+                    }
+                }
+                else
+                {
+                    _log.Info("RealizaOperaciones|MonitoreoBBVA|El monitoreo de verificación la Api BBVA se encuentra apagado en parametros");
+                }
+                _log.Info("RealizaOperaciones|MonitoreoBBVA|Se realizo el monitoreo completo.");
+                _ctrlErrorService.LimpiaControlError(0);
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|MonitoreoBBVA|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info("RealizaOperaciones|MonitoreoBBVA|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Método para obtener las cuentas a procesar
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ObtenerCuentasCMSAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info("RealizaOperaciones|ObtenerCuentasDeCMS|Inicio");
+                DatosXML = await _daoCms.ObtenerDatosAsync(Cms.uspObtenerCuentasCMS,ct);
+                TablaXML = DatosXML.TablaXML;
+                return DatosXML.Exito;
+            }
+            catch(Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ObtenerCuentasDeCMS|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+
+            }
+            finally
+            {
+                _log.Info("RealizaOperaciones|ObtenerCuentasDeCMS|Fin");
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Método para obtener las fechas de operacion del sistema
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ObtenerFechasTOMIAsync(CancellationToken ct)
+        {
+            _log.Info("RealizaOperaciones|Obteniendo Fechas");
+            List<SqlParameter> parametros = new List<SqlParameter>()
+            .AddStringParameter("@cerrado", "0")
+            .AddStringParameter("@nextday", "1")
+            .AddStringParameter("@openday", "1");
+            List<FechasSistemaDTO> _fechasSistemaDto = await _daoTomi.ObtenerFechasAsync(Tomi.uspObtenerFechasTOMI,ct, parametros);
+            string lsDataAnt;
+            
+            if (_fechasSistemaDto != null)
+            {
+                if (_fechasSistemaDto.Count > 0)
+                {
+                    lsDataAnt = _paramConfig.FechaSistema;
+                    _paramConfig.FechaSistema = _fechasSistemaDto[0].Fecha.ToString("yyyyMMdd");
+                    if (_fechasSistemaDto[0].Fecha_Anterior != null)
+                    {                        
+                        _paramConfig.FechaAnterior = _fechasSistemaDto[0].Fecha_Anterior?.ToString("yyyyMMdd");
+                    }
+
+                    if (lsDataAnt != _paramConfig.FechaSistema)
+                    {
+                        if (!string.IsNullOrEmpty(lsDataAnt))
+                        {
+                            _paramConfig.IniciandoServicio = true;
+                        }
+                    }
+                    return true;
+                }
+            }            
+            return false;
+        }
+
+        /// <summary>
+        /// Obtiene Fecha Juliana
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ObtenerFechaJulianaAsync(CancellationToken ct)
+        {
+            try
+            {
+                _log.Info("obtenerParametrosSistema|ObteniendoFechaJulianaDeT24|Inicio");
+                var result = await _daoVt24.ObtenerFechaJuliana(Vt24.upsObtenerFechaJulianaVT24,ct);
+                if (result != null)
+                {
+                    if(_paramConfig.FechaSistema_T24_Juliana != result.Today)
+                    {
+                        _paramConfig.FechaSistema_T24_Juliana= result.Today;
+                        _log.Info($"obtenerParametrosSistema|Fecha Juliana de T24 '{ _paramConfig.FechaSistema_T24_Juliana }'.");
+                    }                    
+                    return true;
+                }                
+            }
+            catch(Exception ex)
+            {
+                _log.Error($"obtenerParametrosSistema|ObteniendoFechaJulianaDeT24|Exception ex:{ex}");
+                //lanzar nuevamente la excepcion para que se registro como error critico en la llamada original y lance una alerta y lo registre en el control de errores
+                throw;
+            }
+            finally
+            {
+                _log.Info("obtenerParametrosSistema|ObteniendoFechaJulianaDeT24|Fin");
+            }
+            return false;
+        }
+
+
+
+
+        /// <summary>
+        /// Método para realizar peticiones a servicio BBVA
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> RealizarPeticionBBVAAsync(CancellationToken ct)
+        {
+            string psw, hexPsw, key, hexKey;
+            bool peticionOK;
+            GenerateTSEC objectTSECToSend;
+            TSECResponse objectTSECResponse;
+            try
+            {
+                _log.Info("RealizaOperaciones|MonitoreoBBVA|HSM-PSW.procesaOperacio|RealizarPeticionBBVA|Inicio");
+
+                //Obtenemos los parametros de BBVA 
+                var paramsDictBBVA = await _daoTomi.ObtenerParametrosBBVAAsync(Tomi.uspObtenerParametrosBBVA,ct);
+                //valida los parametros BBVA
+                var _paramsBBVA = AsignaValidaParametros.ParametrosBBVA(paramsDictBBVA,_log);
+
+
+                // Se descifra el password del llavero (PKC12) por medio del HSM.
+                hexPsw = await HSM_Common.DecryptParametersStoreAsync(
+                    _paramsBBVA.PASSWORD_P12_BBVA
+                    , _paramsBBVA.CLAVE_HSM_PASSWORD_P12_BBVA
+                    , _paramsBBVA.HSM_PUERTO_UP
+                    , _paramsBBVA.HSM_SERVIDOR_UP
+                    , _paramsBBVA.KCV_HSM_PASSWORD_P12_BBVA
+                    , _paramsBBVA.TIMEOUT_TSEC_BBVA
+                    , ct
+                    );
+
+                psw = HSM_Common.Hex2Ascii(hexPsw);                
+                _log.Info("RealizaOperaciones|MonitoreoBBVA|HSM-PSW.procesaOperacion|Término el descifrado de la password del llavero.");
+
+                // Se descifra la llave digital por medio del HSM.
+                hexKey = await HSM_Common.DecryptParametersStoreAsync(
+                    _paramsBBVA.LLAVE_DIGITAL_BBVA
+                    , _paramsBBVA.CLAVE_HSM_LLAVE_DIGITAL_BBVA
+                    , _paramsBBVA.HSM_PUERTO_UP
+                    , _paramsBBVA.HSM_SERVIDOR_UP
+                    , _paramsBBVA.KCV_HSM_LLAVE_DIGITAL_BBVA
+                    , _paramsBBVA.TIMEOUT_TSEC_BBVA
+                    , ct
+                    );
+
+                key = HSM_Common.Hex2Ascii(hexKey);
+                _log.Info("RealizaOperaciones|MonitoreoBBVA|HSM-KEY.procesaOperacion|Término el descifrado de la llave digital.");
+                
+                // Se genera el objeto a envíar.
+                objectTSECToSend = Funciones.ValidarYMapearObjetoAEnviarTSEC(_paramsBBVA.NUMERO_CONTRATO_BBVA, key);
+
+                objectTSECResponse = await _tsecClient.GenerateTsec(
+                    _paramsBBVA.URI_BBVA_GENERATE_TSEC
+                    , objectTSECToSend
+                    , _paramsBBVA.RUTA_P12_BBVA
+                    , psw
+                    , _paramsBBVA.TIMEOUT_TSEC_BBVA
+                );
+
+                peticionOK = objectTSECResponse.Success;
+            }
+            catch (Exception ex)
+            {
+                peticionOK = false;
+                _log.Error($"RealizaOperaciones|MonitoreoBBVA|Error al realizar la petición a BBVA:: {ex.Message}");
+            }
+            finally
+            {
+                _log.Info("RealizaOperaciones|MonitoreoBBVA|HSM-PSW.procesaOperacio|RealizaOperaciones|RealizarPeticionBBVA|Fin");
+            }
+
+            return peticionOK;
+        }
+
+        /// <summary>
+        /// Metodo que obtiene las operaciones detenidas y las notifica por Email
+        /// </summary>
+        /// <returns></returns>
+        public async Task<bool> ValidarOperacionesEnviadasAsync(CancellationToken ct)
+        {
+            try
+            {                
+                _log.Info("RealizaOperaciones|ValidarOperacionesEnviadas|Inicio");
+             
+                var fecha = _configuracion.FechaSistema.StringToDate();                
+                var parametros = new List<SqlParameter>().AddDateTimeParameter("@FechaSistema", fecha);
+
+                var data = await _daoCms.ObtenerOperacionesCanceladas(Cms.uspObtenerOperacionesCanceladasCMS,ct, parametros);
+                if (string.IsNullOrEmpty(data))
+                {
+                    _log.Info($"RealizaOperaciones|ValidarOperacionesEnviadas|No se encontraron");
+                    return false;
+                }
+                var TablaXML = $"Las siguientes operaciones tienen mas de 5 minutos de haber sido enviadas a MUFG : <br> {data} ";
+
+                var mailSubDev = ConfigExtension.GetValorConfig("MAIL_SUBJECT");
+                var mailSenderDev = ConfigExtension.GetValorConfig("MAIL_SENDER_TEST");
+                var mailToDev = ConfigExtension.GetValorConfig("MAIL_TO");
+                var mailCCDev = ConfigExtension.GetValorConfig("MAIL_CC");
+
+
+                string mailToProd = _configuracion.ParametrosSistema.GetValueStringOrDefault("REPLICAS_EMAIL_TO", "");
+                string mailSenderProd = _configuracion.ParametrosSistema.GetValueStringOrDefault("REPLICAS_EMAIL_FROM", "");
+                string mailCCProd = _configuracion.ParametrosSistema.GetValueStringOrDefault("REPLICAS_EMAIL_CC", "");
+                bool boolEnviarmail = true;
+
+                if (string.IsNullOrEmpty(mailToProd))
+                {
+                    _log.Info("ERROR|RealizaOperaciones|ValidarOperacionesEnviadasAsync|EnvíoEmail| No esta configurado el mail destino en parametros del sistema");
+                    boolEnviarmail = false;
+                }
+
+                if (string.IsNullOrEmpty(mailSenderProd))
+                {
+                    _log.Info("ERROR|RealizaOperaciones|ValidarOperacionesEnviadasAsync|EnvíoEmail| No esta configurado el mail emisor en parametros del sistema");
+                    boolEnviarmail = false;
+                }
+
+                if (string.IsNullOrEmpty(TablaXML))
+                {
+                    _log.Info("ERROR|RealizaOperaciones|ValidarOperacionesEnviadasAsync|EnvíoEmail| No se encontraron operaciones detenidas para ser notificadas por Email");
+                    boolEnviarmail = false;
+                }
+
+
+                //Envio de Correo
+                if (!string.IsNullOrEmpty(data) && boolEnviarmail)
+                {
+
+                    string mailFrom = string.IsNullOrEmpty(mailSenderDev) ? mailToProd : mailSenderDev;
+                    string mailPara = string.IsNullOrEmpty(mailToDev) ? mailToProd : mailToDev;
+                    string mailConCopia = string.IsNullOrEmpty(mailCCDev) ? mailCCProd : mailCCDev;
+                    string mailSubject = string.IsNullOrEmpty(mailSubDev) ? EnvioCorreo.ASUNTO_VALIDAR_OPERACIONES : $"{mailSubDev}-{EnvioCorreo.ASUNTO_VALIDAR_OPERACIONES}";
+                    
+                    var result = await _emailService.EnviarAsync(new MensajeCorreo
+                    {
+                        CorreoOrigen = mailFrom,
+                        NombreOrigen = EnvioCorreo.EMISOR_NOMBRE,
+                        Para = mailPara,
+                        ConCopia = mailConCopia,
+                        Asunto = mailSubject,
+                        Mensaje = TablaXML
+                    });
+                    if (!result)
+                    {
+                        _log.Error($"RealizaOperaciones|ValidarOperacionesEnviadas|EnvíoEmail|No se pudo enviar el email, mailTo: {mailPara}, mailFrom: {mailFrom}");
+                        await _ctrlErrorService.ControlErrorAsync(0, new Exception($"No se pudo enviar el email, mailTo: {mailPara}, mailFrom: {mailFrom}"));
+                    }
+                    else
+                    {
+                        _log.Info($"RealizaOperaciones|ValidarOperacionesEnviadas|EnvíoEmail|Correo enviado");
+                        _ctrlErrorService.LimpiaControlError(0);
+                    }
+                }
+                
+                return true;
+            }
+            catch(Exception ex)
+            {
+                _log.Error($"RealizaOperaciones|ValidarOperacionesEnviadas|Se presenta exception: {ex.Message}");
+                await _ctrlErrorService.ControlErrorAsync(0, ex);
+            }
+            finally
+            {
+                _log.Info("RealizaOperaciones|ValidarOperacionesEnviadas|Fin");
+            }
+            return false;
+
+        }
+    }
+}
+
+
